@@ -147,6 +147,85 @@ int main(int argc, char** argv) {
         .commandBufferInfoCount = 1, .pCommandBufferInfos = &commandInfo };
     CHECK(submit(q, 1, &submission, VK_NULL_HANDLE));
     CHECK(vkQueueWaitIdle(q));
+    if (argc > 2 && !strcmp(argv[2], "upload")) {
+        // Uncompressed ASTC end to end (run with debug.axrb.astc_rgba8=1): four
+        // void-extent blocks of one colour, uploaded from a host-visible buffer
+        // through the GPU kernel (which copies them on the GPU), then read back
+        // as the RGBA8 the image is stored as.
+        VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK, .extent = {8, 8, 1}, .mipLevels = 1, .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        VkImage image;
+        CHECK(vkCreateImage(device, &ci, NULL, &image));
+        VkMemoryRequirements requirements;
+        vkGetImageMemoryRequirements(device, image, &requirements);
+        uint32_t type = 0;
+        while (type < memory.memoryTypeCount && !(requirements.memoryTypeBits & (1u << type))) ++type;
+        REQUIRE(type < memory.memoryTypeCount);
+        VkMemoryAllocateInfo allocation = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = requirements.size, .memoryTypeIndex = type };
+        VkDeviceMemory imageMemory;
+        CHECK(vkAllocateMemory(device, &allocation, NULL, &imageMemory));
+        CHECK(vkBindImageMemory(device, image, imageMemory, 0));
+        VkBuffer buffers[2];
+        VkDeviceMemory bufferMemory[2];
+        void* mapped[2];
+        const VkDeviceSize sizes[2] = {64, 256};  // four ASTC blocks; 8 x 8 RGBA8 texels
+        for (int i = 0; i < 2; ++i) {
+            VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = sizes[i],
+                .usage = i ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+            CHECK(vkCreateBuffer(device, &bci, NULL, &buffers[i]));
+            vkGetBufferMemoryRequirements(device, buffers[i], &requirements);
+            const VkMemoryPropertyFlags wanted = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            type = 0;
+            while (type < memory.memoryTypeCount && (!(requirements.memoryTypeBits & (1u << type)) ||
+                   (memory.memoryTypes[type].propertyFlags & wanted) != wanted)) ++type;
+            REQUIRE(type < memory.memoryTypeCount);
+            allocation.allocationSize = requirements.size; allocation.memoryTypeIndex = type;
+            CHECK(vkAllocateMemory(device, &allocation, NULL, &bufferMemory[i]));
+            CHECK(vkBindBufferMemory(device, buffers[i], bufferMemory[i], 0));
+            CHECK(vkMapMemory(device, bufferMemory[i], 0, VK_WHOLE_SIZE, 0, &mapped[i]));
+        }
+        // Void extent: block mode 0x1FC, LDR, all extent bits set; RGBA 0x1234 0x5678 0x9ABC 0xFFFF.
+        static const uint8_t block[16] = {0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                          0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A, 0xFF, 0xFF};
+        for (int i = 0; i < 4; ++i) memcpy((uint8_t*)mapped[0] + 16 * i, block, 16);
+        memset(mapped[1], 0, 256);
+        VkCommandBuffer upload;
+        CHECK(vkAllocateCommandBuffers(device, &cai, &upload));
+        VkCommandBufferBeginInfo once = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+        CHECK(vkBeginCommandBuffer(upload, &once));
+        VkImageMemoryBarrier toDst = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1} };
+        vkCmdPipelineBarrier(upload, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+        VkBufferImageCopy region = { .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {8, 8, 1} };
+        vkCmdCopyBufferToImage(upload, buffers[0], image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        VkImageMemoryBarrier toSrc = toDst;
+        toSrc.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toSrc.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        vkCmdPipelineBarrier(upload, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toSrc);
+        vkCmdCopyImageToBuffer(upload, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffers[1], 1, &region);
+        CHECK(vkEndCommandBuffer(upload));
+        VkSubmitInfo uploadSubmit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &upload };
+        CHECK(vkQueueSubmit(q, 1, &uploadSubmit, VK_NULL_HANDLE));
+        CHECK(vkQueueWaitIdle(q));
+        const uint8_t* texels = (const uint8_t*)mapped[1];
+        for (int i = 0; i < 64; ++i)
+            if (texels[4 * i] != 0x12 || texels[4 * i + 1] != 0x56 || texels[4 * i + 2] != 0x9A || texels[4 * i + 3] != 0xFF) {
+                fprintf(stderr, "texel %d is %02x %02x %02x %02x, expected 12 56 9a ff\n", i,
+                        texels[4 * i], texels[4 * i + 1], texels[4 * i + 2], texels[4 * i + 3]);
+                return 1;
+            }
+        for (int i = 0; i < 2; ++i) { vkDestroyBuffer(device, buffers[i], NULL); vkFreeMemory(device, bufferMemory[i], NULL); }
+        vkDestroyImage(device, image, NULL);
+        vkFreeMemory(device, imageMemory, NULL);
+        puts("VULKAN_ASTC_UPLOAD_PASS");
+    }
     vkDestroyCommandPool(device, pool, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);

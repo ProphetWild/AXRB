@@ -110,10 +110,11 @@ def main():
             if name == 'vulkan_images':
                 run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data', *mounts, binary, 'khr'],
                     log=work / (name + '-khr-selftest.log'), marker=marker, timeout=30)
-                # Uncompressed ASTC: images report their ASTC size and bind to private memory.
+                # Uncompressed ASTC: images report their ASTC size and bind to private memory,
+                # and an upload goes through the GPU kernel (copying the bytes on the GPU).
                 run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data',
-                     '--prop', 'debug.axrb.astc_rgba8=1', *mounts, binary, 'khr'],
-                    log=work / (name + '-rgba8-selftest.log'), marker=marker, timeout=30)
+                     '--prop', 'debug.axrb.astc_rgba8=1', *mounts, binary, 'khr', 'upload'],
+                    log=work / (name + '-rgba8-selftest.log'), marker='VULKAN_ASTC_UPLOAD_PASS', timeout=30)
 
 
 if __name__ == '__main__':

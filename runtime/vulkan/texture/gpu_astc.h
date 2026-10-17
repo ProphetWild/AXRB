@@ -30,8 +30,13 @@ public:
         destroySetLayout_(device_, setLayout_, nullptr);
     }
     bool ready() const { return ready_; }
+    // Where the kernel's input comes from: copied on the GPU, at execution, out
+    // of the game's own upload buffer. Mapped game memory is usually uncached
+    // (measured 0.04-0.3 GB/s for CPU reads on an RTX 5090), so the CPU never
+    // touches it; and the bytes are read exactly when the game's copy would.
+    struct Input { VkBuffer buffer = VK_NULL_HANDLE; VkDeviceSize offset = 0, size = 0, stagingOffset = 0; };
     std::shared_ptr<Job> record(uint32_t family, VkBuffer buffer, VkDeviceSize bytes,
-                               const std::vector<Push>& regions, const std::vector<uint32_t>& slices) {
+                               const std::vector<Push>& regions, const std::vector<uint32_t>& slices, const Input& input = {}) {
         auto job = std::make_shared<Job>(); job->owner = this;
         // Descriptor pools are externally synchronized. Each job owns a separate
         // command pool, so reset/free of different application buffers is safe.
@@ -54,6 +59,13 @@ public:
         if (allocateCommands_(device_,&alloc,&job->command)!=VK_SUCCESS || loader_(device_,job->command)!=VK_SUCCESS) return {};
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         if (beginCommands_(job->command,&begin)!=VK_SUCCESS) return {};
+        if (input.buffer) {
+            const VkBufferCopy region{input.offset, input.stagingOffset, input.size};
+            copyBuffer_(job->command, input.buffer, buffer, 1, &region);
+            VkMemoryBarrier copied{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            copied.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT; copied.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+            barrier_(job->command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&copied,0,nullptr,0,nullptr);
+        }
         bindPipeline_(job->command,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline_);
         bindSets_(job->command,VK_PIPELINE_BIND_POINT_COMPUTE,pipelineLayout_,0,1,&job->set,0,nullptr);
         for (size_t i=0;i<regions.size();++i) {
@@ -93,7 +105,8 @@ private:
             load(destroyCommandPool_, "vkDestroyCommandPool") && load(allocateCommands_, "vkAllocateCommandBuffers") &&
             load(beginCommands_, "vkBeginCommandBuffer") && load(endCommands_, "vkEndCommandBuffer") &&
             load(bindPipeline_, "vkCmdBindPipeline") && load(bindSets_, "vkCmdBindDescriptorSets") &&
-            load(pushConstants_, "vkCmdPushConstants") && load(dispatch_, "vkCmdDispatch") && load(barrier_, "vkCmdPipelineBarrier");
+            load(pushConstants_, "vkCmdPushConstants") && load(dispatch_, "vkCmdDispatch") && load(barrier_, "vkCmdPipelineBarrier") &&
+            load(copyBuffer_, "vkCmdCopyBuffer");
         if (!ok) return false;
         VkShaderModuleCreateInfo shaderInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         shaderInfo.codeSize = sizeof(shaders::kAstcBc3); shaderInfo.pCode = shaders::kAstcBc3;
@@ -148,5 +161,6 @@ private:
     PFN_vkCmdPushConstants pushConstants_ = nullptr;
     PFN_vkCmdDispatch dispatch_ = nullptr;
     PFN_vkCmdPipelineBarrier barrier_ = nullptr;
+    PFN_vkCmdCopyBuffer copyBuffer_ = nullptr;
 };
 }

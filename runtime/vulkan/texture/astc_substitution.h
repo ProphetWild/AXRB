@@ -418,10 +418,15 @@ public:
             upload->liveMapping = memory.mapped;
             upload->live = bytes;
         }
-        // The game's mapping is often uncached memory, slow to read: a GPU
-        // transcode reads it once, at submit (see before_submit).
-        if (mappedHere || dump_limit() > 0)
+        // The game's mapping is often uncached memory, slow to read (0.04-0.3
+        // GB/s): a GPU transcode copies it on the GPU instead (GpuAstc::Input).
+        double recordCopySeconds = 0;
+        auto copySource = [&] {
+            const auto start = std::chrono::steady_clock::now();
             upload->source = std::make_shared<std::vector<uint8_t>>(bytes, bytes + upload->sourceSize);
+            recordCopySeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        };
+        if (mappedHere || dump_limit() > 0) copySource();
         if (mappedHere) state->calls.unmapMemory(device, buffer.memory);
         for (auto& region : planned) region.sourceOffset = region.copy.bufferOffset - first;
         upload->regions = planned;
@@ -461,16 +466,18 @@ public:
                     uint32_t(image.bw) | uint32_t(image.bh)<<8 | uint32_t(image.srgb)<<16 | uint32_t(rgba8)<<17});
                 slices.push_back(r.slices);
             }
-            upload->gpu = state->gpu->record(family, staging.buffer, staging.size, pushes, slices);
+            // The GPU copies the game's bytes itself when it runs the kernel: no
+            // CPU read of the game's (uncached) mapping, now or at submit.
+            const GpuAstc::Input input{source, first, upload->sourceSize, staging.offset + inputOffset};
+            upload->gpu = state->gpu->record(family, staging.buffer, staging.size, pushes, slices, input);
             if (upload->gpu) {
-                upload->gpuSource = staging.mapped + inputOffset;
-                if (upload->source) std::memcpy(upload->gpuSource, upload->source->data(), upload->sourceSize);
-                else upload->deferred = true;
+                upload->live = nullptr;
+                upload->liveMemory = VK_NULL_HANDLE;
                 for (const auto& r : upload->regions) upload->texels += uint64_t(r.width)*r.height*r.slices;
             }
         }
         if (!upload->gpu) {
-            if (!upload->source) upload->source = std::make_shared<std::vector<uint8_t>>(bytes, bytes + upload->sourceSize);
+            if (!upload->source) copySource();
             start(*upload);
         }
         command_.uploads.push_back(upload);
@@ -482,6 +489,7 @@ public:
                             : family >= 32 || !(state->calls.computeFamilies & (1u << family)) ? 4
                             : total > state->calls.maxStorageRange ? 5 : 6];
         stats_.uploadTexels += upload->texels;
+        stats_.recordCopySeconds += recordCopySeconds;
         state->calls.copyBufferToImage(command, staging.buffer, target, layout, uint32_t(staged.size()), staged.data());
         return true;
     }
@@ -503,7 +511,18 @@ public:
                 take_live(*upload);
                 continue;
             }
+            const auto waitStart = std::chrono::steady_clock::now();
             if (upload->batch) upload->batch->wait();
+            const auto waited = std::chrono::steady_clock::now();
+            struct Recheck {  // times the re-read below, for CPU uploads
+                AstcSubstitution* self; const Upload& upload; std::chrono::steady_clock::time_point start, decoded;
+                ~Recheck() {
+                    if (upload.gpu) return;
+                    std::lock_guard lock(self->mutex_);
+                    self->stats_.cpuDecodeWaitSeconds += std::chrono::duration<double>(decoded - start).count();
+                    self->stats_.cpuRereadSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - decoded).count();
+                }
+            } timing{this, *upload, waitStart, waited};
             // The game may write its upload buffer after recording the copy;
             // it can only be read while the memory is still mapped where it was.
             bool readable = false;
@@ -643,7 +662,9 @@ private:
             chunk.size = std::max<VkDeviceSize>(size, 16u << 20);
             VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
             info.size = chunk.size;
-            info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | (gpu && gpu->ready() ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : 0);
+            // The GPU kernel also copies the game's bytes into it (GpuAstc::Input).
+            info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                         (gpu && gpu->ready() ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0);
             if (calls.createBuffer(calls.device, &info, nullptr, &chunk.buffer) != VK_SUCCESS) return {};
             VkMemoryRequirements requirements;
             calls.bufferRequirements(calls.device, chunk.buffer, &requirements);
@@ -716,6 +737,9 @@ private:
         uint64_t cpuWhy[7] = {};
         uint64_t emulatedBytes = 0, bc7Bytes = 0;
         double submitWaitSeconds = 0;
+        // The game thread's time on CPU uploads: waiting for their decode at submit, re-reading
+        // the game's memory at submit, and copying it out while the copy is recorded.
+        double cpuDecodeWaitSeconds = 0, cpuRereadSeconds = 0, recordCopySeconds = 0;
         std::chrono::steady_clock::time_point nextReport{};
     };
 
@@ -926,9 +950,11 @@ private:
             const auto* w = stats_.cpuWhy;
             __android_log_print(ANDROID_LOG_INFO, tag,
                                 "CPU uploads by reason: %llu ETC2/EAC, %llu no GPU kernel, %llu secondary command buffer, "
-                                "%llu reusable command buffer, %llu queue without compute, %llu too large, %llu kernel recording failed",
+                                "%llu reusable command buffer, %llu queue without compute, %llu too large, %llu kernel recording failed; "
+                                "game thread on them: %.2f s decode wait, %.2f s re-reading game memory at submit, %.2f s copying it while recording",
                                 (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3],
-                                (unsigned long long)w[4], (unsigned long long)w[5], (unsigned long long)w[6]);
+                                (unsigned long long)w[4], (unsigned long long)w[5], (unsigned long long)w[6],
+                                stats_.cpuDecodeWaitSeconds, stats_.cpuRereadSeconds, stats_.recordCopySeconds);
         }
     }
 
