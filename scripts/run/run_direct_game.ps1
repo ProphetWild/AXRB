@@ -170,8 +170,36 @@ try {
         pauseSucceeded = [bool]$pauseSucceeded
         # Saves are ordinary Windows files, written as the game writes them.
         syncSucceeded = [bool]$pauseSucceeded
+        # What this session ran with, so logs from different settings can be told apart.
+        settings = [ordered]@{
+            translator = $Translator; textureMode = $TextureMode; fastFp = [bool]$FastFp
+            guestCpus = $(if ($GuestCpus -gt 0) { $GuestCpus } else { 'auto' })
+            preciseImageWait = $(if ($env:AXRB_PRECISE_IMAGE_WAIT) { $env:AXRB_PRECISE_IMAGE_WAIT } else { '1' })
+            precomposeProjectionLayers = [bool]$PrecomposeProjectionLayers
+            legacyOculusDriver = [bool]$LegacyOculusDriver; questIdentity = [bool]$QuestIdentity; controllersOnly = [bool]$ControllersOnly
+        }
+        build = $(try {
+            $info = Join-Path (Split-Path -Parent $Executable) 'build-info.json'
+            $record = if (Test-Path -LiteralPath $info) { Get-Content -LiteralPath $info -Raw | ConvertFrom-Json } else { [ordered]@{} }
+            $record | Add-Member -NotePropertyName runnerSha256 -NotePropertyValue ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.Substring(0, 16).ToLowerInvariant()) -Force -PassThru
+        } catch { $null })
     }
-    try { $session | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $logs 'session.json') -Encoding UTF8 } catch { Write-Output "Warning: could not write session record: $_" }
+    try { $session | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $logs 'session.json') -Encoding UTF8 } catch { Write-Output "Warning: could not write session record: $_" }
+    # The next session overwrites these logs; keep a copy of the last ten
+    # sessions in logs/game/sessions/<start time>-<package>. direct.log holds
+    # direct.out and direct.err, so those are not copied.
+    try {
+        $history = Join-Path $logs 'sessions'
+        $stamp = if ($sessionStartedAt) { $sessionStartedAt.ToString('yyyyMMdd-HHmmss') } else { (Get-Date).ToString('yyyyMMdd-HHmmss') }
+        $kept = Join-Path $history "$stamp-$Package"
+        New-Item -ItemType Directory -Force -Path $kept | Out-Null
+        foreach ($name in 'session.json', 'direct.log', 'host.err', 'host.log') {
+            $file = Join-Path $logs $name
+            if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination $kept }
+        }
+        Get-ChildItem -LiteralPath $history -Directory | Sort-Object Name -Descending | Select-Object -Skip 10 |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    } catch { Write-Output "Warning: could not keep this session's logs: $_" }
     Write-Output 'AXRB game session stopped.'
 }
 if ($hostLost) { exit 4 }

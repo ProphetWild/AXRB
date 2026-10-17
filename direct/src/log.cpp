@@ -80,6 +80,8 @@ void log_write(LogLevel level, const char* tag, const char* format, ...) {
     va_end(args);
 }
 
+double log_seconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_start).count(); }
+
 void log_raw(const char* text, size_t length, bool urgent) {
     // Guest logcat arrives here on the thread that logged, often a game
     // thread: routine lines are flushed at most every 250 ms instead of twice

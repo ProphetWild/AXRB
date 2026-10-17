@@ -78,7 +78,7 @@ export class DiagnosticHarness {
           if (entry.isSymbolicLink() || /credential|token|cookie|auth|secret/i.test(entry.name)) continue;
           const file = path.join(dir, entry.name);
           if (entry.isDirectory() && depth < 3) await walk(file, depth + 1);
-          else if (entry.isFile() && /\.(log|txt|json|err|csv)$/i.test(entry.name)) {
+          else if (entry.isFile() && /\.(log|txt|json|err|out|csv)$/i.test(entry.name)) {
             const id = path.relative(base, file).replaceAll('\\', '/'); files.set(id, { file, base });
           }
         }
@@ -146,7 +146,12 @@ export class DiagnosticHarness {
         data=approved ? {approved:true,output:await adb(command,signal,180000)} : {approved:false,message:'User declined. Do not repeat this request.'};
         cache.clear();
       }
-      else if (name === 'snapshot') data = (await this.snapshot()).slice(0, 45000);
+      else if (name === 'snapshot') {
+        // The bundle ends with the runtime's log tails (direct.log, host.err):
+        // keep its head (settings, sessions) and its end rather than the head alone.
+        const text = await this.snapshot();
+        data = text.length <= 45000 ? text : `${text.slice(0, 15000)}\n[… ${text.length - 45000} characters omitted; use read_file or search_logs for them …]\n${text.slice(-30000)}`;
+      }
       else if (name === 'live_logs') data = this.live().slice(-45000);
       else if (name === 'host') data = { platform: os.release(), cpus: os.cpus().length, freeMemory: os.freemem(), totalMemory: os.totalmem(), windows: await this.execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', hostScript], { timeout: 20000, signal }) };
       else if (name === 'list_logs') data = { files: await enumerate(), limit: 150 };

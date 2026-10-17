@@ -773,8 +773,9 @@ ServiceSocket::Handler logd_writer() {
         std::string_view tag = rest.substr(0, tag_end);
         std::string_view text = rest.substr(tag_end + 1);
         while (!text.empty() && (text.back() == '\0' || text.back() == '\n')) text.remove_suffix(1);
-        char prefix[96];
-        int n = std::snprintf(prefix, sizeof prefix, "%c/%.*s(%5u): ", priority < 9 ? kLevels[priority] : '?',
+        // Timed like the runner's own lines, so the two interleave readably.
+        char prefix[112];
+        int n = std::snprintf(prefix, sizeof prefix, "%9.3f %c/%.*s(%5u): ", log_seconds(), priority < 9 ? kLevels[priority] : '?',
                               static_cast<int>(std::min<size_t>(tag.size(), 48)), tag.data(), tid);
         // One log line per text line, like logcat.
         size_t at = 0;

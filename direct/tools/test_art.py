@@ -110,6 +110,10 @@ def main():
             if name == 'vulkan_images':
                 run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data', *mounts, binary, 'khr'],
                     log=work / (name + '-khr-selftest.log'), marker=marker, timeout=30)
+                # Uncompressed ASTC: images report their ASTC size and bind to private memory.
+                run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data',
+                     '--prop', 'debug.axrb.astc_rgba8=1', *mounts, binary, 'khr'],
+                    log=work / (name + '-rgba8-selftest.log'), marker=marker, timeout=30)
 
 
 if __name__ == '__main__':

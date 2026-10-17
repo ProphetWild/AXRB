@@ -88,7 +88,7 @@ uint64_t GetImageMemoryRequirements(const uint64_t *a) {
   auto linear = linear_image(a_<VkImage>(a[1]));
   if (linear)
     *a_<VkMemoryRequirements *>(a[2]) = linear->requirements;
-  else
+  else if (!private_requirements(a_<VkDevice>(a[0]), a_<VkImage>(a[1]), a_<VkMemoryRequirements *>(a[2])))
     host<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(
         a_<VkDevice>(a[0]), a_<VkImage>(a[1]),
         a_<VkMemoryRequirements *>(a[2]));
@@ -98,11 +98,13 @@ uint64_t image_memory_requirements2(const uint64_t *a, const char* name) {
   auto *info = a_<const VkImageMemoryRequirementsInfo2 *>(a[1]);
   auto linear = linear_image(info->image);
   auto *out = a_<VkMemoryRequirements2 *>(a[2]);
-  if (!linear)
+  VkMemoryRequirements reported{};
+  const bool own = !linear && private_requirements(a_<VkDevice>(a[0]), info->image, &reported);
+  if (!linear && !own)
     host<PFN_vkGetImageMemoryRequirements2>(name)(
         a_<VkDevice>(a[0]), info, out);
   else {
-    out->memoryRequirements = linear->requirements;
+    out->memoryRequirements = linear ? linear->requirements : reported;
     for (auto *p = static_cast<VkBaseOutStructure *>(out->pNext); p;
          p = p->pNext)
       if (p->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS) {
@@ -124,7 +126,7 @@ VkResult bind_linear(VkDevice device, VkImage image, VkDeviceMemory memory,
   auto linear = linear_image(image);
   auto bind = host<PFN_vkBindImageMemory>("vkBindImageMemory");
   if (!linear)
-    return bind(device, image, memory, offset);
+    return is_private(image) ? bind_private(device, image) : bind(device, image, memory, offset);
   auto calls = calls_for(device);
   VkMemoryRequirements req{};
   host<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(
@@ -163,6 +165,8 @@ uint64_t bind_image_memory2(const uint64_t *a, const char* name) {
     if (linear_image(infos[i].image))
       result = bind_linear(a_<VkDevice>(a[0]), infos[i].image, infos[i].memory,
                            infos[i].memoryOffset);
+    else if (is_private(infos[i].image))
+      result = bind_private(a_<VkDevice>(a[0]), infos[i].image);
     else
       result = host<PFN_vkBindImageMemory2>(name)(
           a_<VkDevice>(a[0]), 1, infos + i);

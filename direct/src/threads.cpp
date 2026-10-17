@@ -484,18 +484,22 @@ static int nice_to_priority(int nice) {
 
 int guest_cpu_count() {
     static int count = [] {
-        if (const char* text = std::getenv("AXRB_DIRECT_CPUS")) return std::clamp(std::atoi(text), 1, 64);
-        // The processors this process may run on: fewer than the machine's
-        // when the player (or a core-parking tool) restricts it.
-        int processors = 0;
-        DWORD_PTR allowed = 0, system = 0;
-        if (GetProcessAffinityMask(GetCurrentProcess(), &allowed, &system)) processors = static_cast<int>(__popcnt64(allowed));
-        if (!processors) {
-            SYSTEM_INFO info;
-            GetSystemInfo(&info);
-            processors = static_cast<int>(info.dwNumberOfProcessors);
-        }
-        return std::clamp(processors, 2, 8);
+        const int chosen = [] {
+            if (const char* text = std::getenv("AXRB_DIRECT_CPUS")) return std::clamp(std::atoi(text), 1, 64);
+            // The processors this process may run on: fewer than the machine's
+            // when the player (or a core-parking tool) restricts it.
+            int processors = 0;
+            DWORD_PTR allowed = 0, system = 0;
+            if (GetProcessAffinityMask(GetCurrentProcess(), &allowed, &system)) processors = static_cast<int>(__popcnt64(allowed));
+            if (!processors) {
+                SYSTEM_INFO info;
+                GetSystemInfo(&info);
+                processors = static_cast<int>(info.dwNumberOfProcessors);
+            }
+            return std::clamp(processors, 2, 8);
+        }();
+        LOGI("threads", "%d guest CPUs (%s)", chosen, std::getenv("AXRB_DIRECT_CPUS") ? "AXRB_DIRECT_CPUS" : "automatic");
+        return chosen;
     }();
     return count;
 }

@@ -21,19 +21,46 @@ test('Direct runtime logs reach live capture and exported bundles without ADB', 
   await fs.mkdir(logs, { recursive: true });
   const capture = new LiveDiagnostics({ directory, getConfig: () => ({}),
     spawnProcess: () => { throw new Error('Direct capture must not start ADB'); } });
-  for (const name of ['direct.log', 'direct.out', 'direct.err']) {
+  // Without direct.log (an older runner), its two halves are read instead.
+  for (const name of ['direct.out', 'direct.err']) {
     await fs.writeFile(path.join(logs, name), `${name}: startup failed access_token=private-direct-token\n`);
   }
   await capture.tailFiles(directory);
-  const entries = capture.snapshot().entries;
-  assert.equal(entries.length, 3);
+  let entries = capture.snapshot().entries;
+  assert.equal(entries.length, 2);
   assert.ok(entries.every(entry => entry.source === 'android'));
+  for (const name of ['direct.out', 'direct.err']) assert.ok(entries.some(entry => entry.tag === name && entry.text.includes('startup failed')));
+  // direct.log holds both, so with it present the duplicates are skipped.
+  await fs.writeFile(path.join(logs, 'direct.log'), 'direct.log: startup failed access_token=private-direct-token\n');
+  await capture.tailFiles(directory);
+  entries = capture.snapshot().entries;
+  assert.equal(entries.length, 3);
+  assert.ok(entries.some(entry => entry.tag === 'direct.log' && entry.text.includes('startup failed')));
   const bundle = await collectDiagnostics({ dataHome: directory });
-  for (const name of ['direct.log', 'direct.out', 'direct.err']) {
-    assert.ok(entries.some(entry => entry.tag === name && entry.text.includes('startup failed')));
-    assert.ok(bundle.includes(`--- ${name} ---\n${name}: startup failed`));
-  }
+  for (const name of ['direct.log', 'direct.out', 'direct.err']) assert.ok(bundle.includes(`--- ${name} ---\n${name}: startup failed`));
   assert.doesNotMatch(capture.text() + bundle, /private-direct-token/);
+});
+
+test('direct.log lines keep their level, tag, guest time and perf samples', async t => {
+  const directory = await temporary(t), logs = path.join(directory, 'logs/game');
+  await fs.mkdir(logs, { recursive: true });
+  const capture = new LiveDiagnostics({ directory, getConfig: () => ({}), spawnProcess: () => { throw new Error('no ADB'); } });
+  await fs.writeFile(path.join(logs, 'direct.log'), [
+    '    1.250 28688 E/cpu: guest called unknown host function',
+    '   12.500 I/AXRB.Perf( 4242): AXRB.Perf end-frame: rate=90/s avg=1.1ms samples=450 p50=1.0ms p95=2.0ms p99=3.0ms',
+    'W/Unity( 4250): legacy line without a time',
+    'AXRB_AOSP_ACTIVITY_CREATED com.example.Main',
+  ].join('\n') + '\n');
+  await capture.tailFiles(directory);
+  const entries = capture.snapshot().entries;
+  assert.deepEqual(entries.map(entry => [entry.level, entry.tag, entry.guestTime, entry.pid]), [
+    ['E', 'AXRB.direct.cpu', '+1.250s', '28688'],
+    ['I', 'AXRB.Perf', '+12.500s', '4242'],
+    ['W', 'Unity', null, '4250'],
+    ['I', 'direct.log', null, null],
+  ]);
+  assert.equal(entries[1].text, 'AXRB.Perf end-frame: rate=90/s avg=1.1ms samples=450 p50=1.0ms p95=2.0ms p99=3.0ms');
+  assert.match(capture.perfText(), /end-frame/);
 });
 async function until(predicate) {
   const deadline = Date.now() + 5000;

@@ -30,6 +30,19 @@ const ADB_FAULT_GRACE = 60000;
 const ADB_SETTLING = 'The ADB server is not answering yet; retrying.';
 const LEVELS = new Set(['V', 'D', 'I', 'W', 'E', 'F']);
 const logcatLine = /^(\d\d-\d\d\s+\d\d:\d\d:\d\d\.\d+)\s+(\d+)\s+\d+\s+([VDIWEF])\s+([^:]+):\s?(.*)$/;
+// Direct mode's direct.log: the runner's own lines ("  12.345  4242 I/tag: text",
+// seconds since start and a host thread id) and the guest's logcat
+// ("  12.345 I/Tag( 123): text", or without the time from older runners).
+// T is the runner's trace level. Returned in logcatLine's group order.
+const directLine = /^\s*(?:(\d+\.\d+)\s+)?(?:(\d+)\s+)?([VDIWEFT])\/([^\s(:][^(:]*?)(?:\(\s*(\d+)\))?:\s?(.*)$/;
+function directMatch(raw) {
+  const match = raw.match(directLine);
+  if (!match) return null;
+  // The runner's own lines (a host thread id, no guest tid) are AXRB's, kept and never rate-limited.
+  const runner = match[2] && !match[5];
+  return [match[0], match[1] ? `+${match[1]}s` : null, match[5] || match[2] || null, match[3] === 'T' ? 'V' : match[3],
+    runner ? `AXRB.direct.${match[4]}` : match[4], match[6]];
+}
 // Guest kernel-console shapes. These facilities carry stock boot chatter that
 // keyword inference mistakes for failures; kernelCrash lists signatures that
 // are never demoted. A timestamp alone is not enough: timestamped lines from
@@ -42,7 +55,8 @@ const emulatorSeverity = /^(VERBOSE|DEBUG|INFO|WARNING|ERROR|FATAL)\s+\|/;
 const EMULATOR_LEVELS = { VERBOSE: 'V', DEBUG: 'D', INFO: 'I', WARNING: 'W', ERROR: 'E', FATAL: 'F' };
 const bootHeartbeat = /^Android startup diagnostic: \d+s elapsed; /;
 const kernelCrash = /panic|oops|\bBUG\b|unable to handle|call trace|fatal signal/i;
-const perfLine = /^AXRB\.Perf ([\w.-]+): rate=([\d.]+)\/s avg=([\d.]+)ms .*p50=([\d.]+)ms p95=([\d.]+)ms p99=([\d.]+)ms/;
+// Anywhere in the line: guest logcat carries it after its own tag prefix.
+const perfLine = /\bAXRB\.Perf ([\w.-]+): rate=([\d.]+)\/s avg=([\d.]+)ms .*p50=([\d.]+)ms p95=([\d.]+)ms p99=([\d.]+)ms/;
 const PERF_WINDOWS = 12;
 const PERF_SLOW_FRAME_MS = 250;
 const PERF_WARN_INTERVAL_MS = 60000;
@@ -152,7 +166,7 @@ export class LiveDiagnostics {
     if (!SOURCES.has(source)) throw new Error('Invalid diagnostic source.');
     for (const raw of String(text ?? '').replaceAll('\r', '').split('\n')) {
       if (!raw) continue;
-      const match = source === 'android' ? raw.match(logcatLine) : null;
+      const match = source === 'android' ? raw.match(logcatLine) ?? (metadata.direct ? directMatch(raw) : null) : null;
       const level = match?.[3] || metadata.level || inferLevel(source, raw);
       const fields = {
         receivedAt: metadata.receivedAt || new Date().toISOString(), source,
@@ -360,21 +374,27 @@ export class LiveDiagnostics {
   }
   async tailFiles(dataHome) {
     if (!dataHome) return;
-    for (const [label, file] of diagnosticSources(dataHome).filter(([label]) => /\.(?:log|err|out)$/.test(label))) {
+    const sources = diagnosticSources(dataHome).filter(([label]) => /\.(?:log|err|out)$/.test(label));
+    // direct.log already holds direct.out and direct.err; read those only without it.
+    const directLog = sources.find(([label]) => label === 'direct.log');
+    const unified = directLog && await fs.access(directLog[1]).then(() => true, () => false);
+    for (const [label, file] of sources) {
+      if (unified && (label === 'direct.out' || label === 'direct.err')) continue;
       const source = label.startsWith('direct.') ? 'android' : label.startsWith('host.') ? 'host' : 'emulator';
+      const direct = label.startsWith('direct.');
       let handle;
       try {
         handle = await fs.open(file, 'r');
         const stat = await handle.stat();
         let cursor = this.files.get(file);
         if (!cursor || cursor.ino !== stat.ino || stat.size < cursor.offset || (stat.size === cursor.offset && stat.mtimeMs !== cursor.mtime)) {
-          if (cursor) this.write(source, cursor.decoder.end(), { tag: label, end: true });
+          if (cursor) this.write(source, cursor.decoder.end(), { tag: label, direct, end: true });
           cursor = { offset: await diagnosticTailOffset(handle, stat.size, READ_BYTES), ino: stat.ino, mtime: stat.mtimeMs, decoder: new StringDecoder('utf8'), source, label };
           this.files.set(file, cursor);
           if (cursor.offset) this.append(source, `[Reading the last ${READ_BYTES} bytes of ${label}]`, { tag: label, level: 'W' });
         }
         if (stat.size - cursor.offset > 4 * READ_BYTES) {
-          this.write(source, cursor.decoder.end(), { tag: label, end: true });
+          this.write(source, cursor.decoder.end(), { tag: label, direct, end: true });
           cursor.offset = await diagnosticTailOffset(handle, stat.size, READ_BYTES); cursor.decoder = new StringDecoder('utf8');
           this.append(source, `[Skipped older ${label} output to keep capture responsive]`, { tag: label, level: 'W' });
         }
@@ -383,7 +403,7 @@ export class LiveDiagnostics {
           const buffer = Buffer.allocUnsafe(length);
           const { bytesRead } = await handle.read(buffer, 0, length, cursor.offset);
           cursor.offset += bytesRead; cursor.mtime = stat.mtimeMs;
-          this.write(source, cursor.decoder.write(buffer.subarray(0, bytesRead)), { tag: label });
+          this.write(source, cursor.decoder.write(buffer.subarray(0, bytesRead)), { tag: label, direct });
         }
       } catch (error) {
         if (error.code !== 'ENOENT' && error.code !== 'EACCES') throw error;

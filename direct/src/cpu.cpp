@@ -156,7 +156,9 @@ public:
         // estimate instructions and standard-FPCR vector code.
         static const bool fast_fp = [] {
             const char* v = std::getenv("AXRB_DIRECT_FAST_FP");
-            return v && v[0] == '1';
+            const bool on = v && v[0] == '1';
+            LOGI("cpu", "Dynarmic floating point: %s", on ? "fast (AXRB_DIRECT_FAST_FP=1)" : "exact");
+            return on;
         }();
         if (fast_fp) {
             config.unsafe_optimizations = true;

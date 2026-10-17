@@ -17,6 +17,8 @@ void log_writev(LogLevel level, const char* tag, const char* format, va_list arg
 bool trace_enabled(const char* category);
 // Raw text, e.g. guest stdout/logcat lines, written without a prefix.
 void log_raw(const char* text, size_t length, bool urgent = true);
+// Seconds since the runner started: the time prefix of every log line.
+double log_seconds();
 void log_flush();
 
 [[noreturn]] void fatal(const char* format, ...);

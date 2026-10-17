@@ -239,6 +239,7 @@ uint64_t GetPhysicalDeviceImageFormatProperties2KHR(const uint64_t* a) {
 
 #define NEXT(field, name) (c ? c->field : host<decltype(DeviceCalls::field)>(name))
 
+#include "vk_private.inc"
 #include "vk_linear.inc"
 
 uint64_t DestroyDevice(const uint64_t* a) {
@@ -256,6 +257,7 @@ uint64_t DestroyDevice(const uint64_t* a) {
             destroy_linear(device, image);
         }
         images().remove_device(device);
+        destroy_private_device(device);
         std::unique_lock lock(g_lock);
         g_devices.erase(key(device));
     }
@@ -279,6 +281,7 @@ uint64_t CreateImage(const uint64_t* a) {
     const VkResult result = images().create_image(device, info, nullptr, out);
     TRACE("vkimage", "created image=%p result=%d usage=0x%x", result == VK_SUCCESS ? *out : VK_NULL_HANDLE, result, info->usage);
     if (result != VK_SUCCESS) LOGW("vulkan", "image creation failed %d format=%u tiling=%u", result, info->format, info->tiling);
+    else track_private(device, *out, *info);
     return r_(result);
 }
 
@@ -288,6 +291,7 @@ uint64_t DestroyImage(const uint64_t* a) {
     if (!calls_for(device)) host<PFN_vkDestroyImage>("vkDestroyImage")(device, image, nullptr);
     else images().destroy_image(device, image, nullptr);
     destroy_linear(device, image);
+    release_private(image);
     return 0;
 }
 

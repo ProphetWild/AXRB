@@ -908,7 +908,11 @@ const aiHarness = new DiagnosticHarness({
       dataHome: process.env.AXRB_DATA_HOME || path.join(root, 'out'), game: game?.id || '', package: game?.package || '',
       title: game?.name || game?.title || '', session: runtime.child?.pid || null, backend: !buildProfile.emulatorEnabled || runtime.direct ? 'direct' : runtime.bridgeStopEvent ? 'quest-bridge' : 'android-emulator',
       runningGame: runtime.game || '', watchdog: emulatorWatchdog?.snapshot(),
-      memoryMB: runtime.settings.memoryMB, cpuCores: runtime.settings.cpuCores, hardware: setup?.status.hardware };
+      memoryMB: runtime.settings.memoryMB, cpuCores: runtime.settings.cpuCores, hardware: setup?.status.hardware,
+      // What the next (or current) direct-mode session runs with.
+      direct: { translator: runtime.settings.directTranslator || 'dynarmic', textureMode: runtime.settings.textureMode || 'rgba8',
+        fastFloatingPoint: runtime.settings.directFastFp === true, guestCpus: runtime.settings.directCpus || 'auto',
+        precomposeProjectionLayers: runtime.settings.precomposeProjectionLayers === true } };
   },
   snapshot: () => diagnosticSnapshot({ compact: true }),
   live: () => `${liveDiagnostics.text()}\n${liveDiagnostics.perfText()}`,
