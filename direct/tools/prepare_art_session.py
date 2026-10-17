@@ -98,7 +98,7 @@ LEGACY_DRIVER_ROOT = '/data/app/com.oculus.systemdriver-axrb'
 
 def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
             runtime=None, assets=None, check_jni=False, diagnostics=False,
-            legacy_oculus_driver=None, quest_identity=False, controllers_only=False):
+            legacy_oculus_driver=None, quest_identity=False, controllers_only=False, textures='rgba8'):
     apk, bootstrap = required(apk), required(bootstrap)
     sysroot, data = Path(sysroot).resolve(), Path(data).resolve()
     native, proxies = Path(native), Path(proxies)
@@ -167,10 +167,14 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
     for prop in ('ro.hardware.egl=axrb', 'servicemanager.ready=true',
                  'dalvik.vm.usejit=false', 'dalvik.vm.usejitprofiles=false'):
         args.extend(['--prop', prop])
-    # ASTC textures uncompressed (RGBA8, decoded on the GPU) rather than
-    # re-encoded as BC3; AXRB_ASTC_RGBA8=0 in the environment restores BC3.
-    if os.environ.get('AXRB_ASTC_RGBA8', '1') != '0':
+    # How ASTC textures are stored: uncompressed RGBA8 decoded on the GPU,
+    # BC3 converted on the GPU, or BC7 encoded by the CPU workers.
+    if textures == 'rgba8':
         args.extend(['--prop', 'debug.axrb.astc_rgba8=1'])
+    elif textures == 'bc7':
+        args.extend(['--prop', 'debug.axrb.astc_gpu=0'])
+    elif textures != 'gpu':
+        raise ValueError(f'Unknown texture mode: {textures}')
     for env in ('LD_LIBRARY_PATH=/apex/com.android.art/lib64:/apex/com.android.os.statsd/lib64:/apex/com.android.runtime/lib64/bionic:/system/lib64',
                 'BOOTCLASSPATH=' + boot, 'CLASSPATH=/system/framework/axrb-bootstrap.dex'):
         args.extend(['--env', env])
@@ -195,6 +199,7 @@ def main():
     parser.add_argument('--quest-identity', action='store_true')
     parser.add_argument('--controllers-only', action='store_true')
     parser.add_argument('--diagnostics', action='store_true')
+    parser.add_argument('--textures', choices=('rgba8', 'gpu', 'bc7'), default='rgba8')
     print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=True))
 
 

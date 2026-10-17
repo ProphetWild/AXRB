@@ -321,6 +321,9 @@ export class Runtime {
     const args = bridge ? [] : direct ? powershellArgs(direct.script, { Apk: direct.apk, Package: game.package, GameName: game.name || game.package,
       Activity: game.activity,
       Translator: this.settings.directTranslator || 'dynarmic',
+      TextureMode: this.settings.textureMode || 'rgba8',
+      ...(this.settings.directFastFp === true ? { FastFp: true } : {}),
+      ...(Number.isInteger(this.settings.directCpus) && this.settings.directCpus > 0 ? { GuestCpus: this.settings.directCpus } : {}),
       Executable: direct.executable, DataDirectory: direct.data, Sysroot: direct.sysroot, FpsHudEventName: this.fpsHudEvent,
       ...(direct.assetList ? { AssetList: direct.assetList } : {}),
       ...(compatibility.legacyOculusDriver ? { LegacyOculusDriver: true } : {}),
@@ -329,7 +332,7 @@ export class Runtime {
       ...(sessionId ? { SessionId: sessionId } : {}),
       ...(precompose ? { PrecomposeProjectionLayers: true } : {}) })
       : powershellArgs(path.join(this.root, 'scripts/run/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.settings.port,
-      Sdk: this.settings.sdk, MemoryMB: this.settings.memoryMB, CpuCores: this.settings.cpuCores ?? 4, TextureMode: this.settings.textureMode ?? 'gpu', Package: game.package, Activity: game.activity, GameName: game.name, FpsHud: this.settings.fpsHud === true, FpsHudEventName: this.fpsHudEvent,
+      Sdk: this.settings.sdk, MemoryMB: this.settings.memoryMB, CpuCores: this.settings.cpuCores ?? 4, TextureMode: this.settings.textureMode === 'bc7' ? 'bc7' : 'gpu', Package: game.package, Activity: game.activity, GameName: game.name, FpsHud: this.settings.fpsHud === true, FpsHudEventName: this.fpsHudEvent,
       // Recovery inside the game script must use the same CPU policy as ensure().
       GuestClock: this.settings.guestClock || 'Auto',
       ...(this.settings.localApic ? { LocalApic: this.settings.localApic } : {}),

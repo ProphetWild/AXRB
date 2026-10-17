@@ -11,19 +11,24 @@ test('Direct launches forward the selected translator and default to Dynarmic', 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'axrb-translator-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const script = path.join(root, 'direct.ps1');
-  await fs.writeFile(script, `param($Apk, $Package, $GameName, $Activity, $Translator, $Executable, $DataDirectory, $Sysroot, $FpsHudEventName)
-Write-Output "TRANSLATOR:$Translator"
+  await fs.writeFile(script, `param($Apk, $Package, $GameName, $Activity, $Translator, $TextureMode, [switch]$FastFp, $GuestCpus, $Executable, $DataDirectory, $Sysroot, $FpsHudEventName)
+Write-Output "TRANSLATOR:$Translator TEXTURE:$TextureMode FASTFP:$FastFp CPUS:$GuestCpus"
 `);
   const runtime = new Runtime(root, {}, () => {}, { emulatorEnabled: false });
   const game = { id: 'test', package: 'com.example.game', activity: 'com.example.game/.Main' };
+  const launch = () => new Promise(resolve => runtime.launch(game, (code, output) => resolve({ code, output }), {}, {
+    direct: { script, apk: 'fixture.apk', executable: 'fixture.exe', data: root, sysroot: root }
+  }));
   for (const translator of [undefined, 'digitalis', 'dynarmic']) {
     runtime.settings.directTranslator = translator;
-    const result = await new Promise(resolve => runtime.launch(game, (code, output) => resolve({ code, output }), {}, {
-      direct: { script, apk: 'fixture.apk', executable: 'fixture.exe', data: root, sysroot: root }
-    }));
+    const result = await launch();
     assert.equal(result.code, 0, result.output);
-    assert.match(result.output, new RegExp(`TRANSLATOR:${translator || 'dynarmic'}`));
+    assert.match(result.output, new RegExp(`TRANSLATOR:${translator || 'dynarmic'} TEXTURE:rgba8 FASTFP:False CPUS:\\s*$`, 'm'));
   }
+  Object.assign(runtime.settings, { textureMode: 'bc7', directFastFp: true, directCpus: 12 });
+  const tuned = await launch();
+  assert.equal(tuned.code, 0, tuned.output);
+  assert.match(tuned.output, /TEXTURE:bc7 FASTFP:True CPUS:12/);
 });
 
 test('status() reports a stopped, unreachable emulator without throwing', { skip: process.platform !== 'win32', timeout: 15000 }, async () => {

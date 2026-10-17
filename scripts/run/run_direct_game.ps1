@@ -10,6 +10,12 @@ param(
     [string]$HostExe,
     [string]$GpuLayerDirectory,
     [ValidateSet('dynarmic', 'digitalis')][string]$Translator = 'dynarmic',
+    # ASTC storage: uncompressed RGBA8, GPU BC3, or CPU BC7.
+    [ValidateSet('rgba8', 'gpu', 'bc7')][string]$TextureMode = 'rgba8',
+    # Dynarmic's faster floating point (AXRB_DIRECT_FAST_FP); no effect with Digitalis.
+    [switch]$FastFp,
+    # Guest CPU count (AXRB_DIRECT_CPUS); 0 keeps the runner's own choice, up to 8.
+    [ValidateRange(0, 64)][int]$GuestCpus = 0,
     [switch]$PrecomposeProjectionLayers,
     # Per-game compatibility for unmodified Quest APKs with older Oculus loaders.
     [switch]$LegacyOculusDriver,
@@ -46,7 +52,7 @@ $prepare = @((Join-Path $AxrbRoot 'direct/tools/prepare_art_session.py'),
     '--apk', $Apk, '--activity', $Activity, '--sysroot', $Sysroot, '--data', $DataDirectory,
     '--bootstrap', (Join-Path $directDirectory 'art/axrb-bootstrap.dex'),
     '--native', (Join-Path $directDirectory 'art/lib64'),
-    '--proxies', (Join-Path $directDirectory 'guest/lib64'))
+    '--proxies', (Join-Path $directDirectory 'guest/lib64'), '--textures', $TextureMode)
 if ($AssetList) { $prepare += @('--assets', $AssetList) }
 if ($LegacyOculusDriver) { $prepare += @('--legacy-oculus-driver', (Join-Path $directDirectory 'guest/axrb-systemdriver.apk')) }
 if ($QuestIdentity) { $prepare += '--quest-identity' }
@@ -107,6 +113,9 @@ try {
         AXRB_DIRECT_LOG = Join-Path $logs 'direct.log'
         AXRB_GPU_LAYER_DIR = $GpuLayerDirectory
     }
+    # Set only when chosen, so a value in the user's own environment still applies otherwise.
+    if ($FastFp) { $environment.AXRB_DIRECT_FAST_FP = '1' }
+    if ($GuestCpus -gt 0) { $environment.AXRB_DIRECT_CPUS = [string]$GuestCpus }
     foreach ($name in $environment.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $environment[$name]) }
     $gameProcess = Start-Process -FilePath $Executable -ArgumentList @($arguments | ForEach-Object { Quote $_ }) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\direct.out" -RedirectStandardError "$logs\direct.err"
     $null = $gameProcess.Handle

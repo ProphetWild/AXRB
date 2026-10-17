@@ -381,8 +381,8 @@ const pendingRuntime = await state.pendingRuntime();
 const components = JSON.parse(await fs.readFile(path.join(directory, 'core/components.json'), 'utf8'));
 platformTools = components.find(c => c.id === 'platform-tools');
 state.data.settings = { sdk: path.join(process.env.LOCALAPPDATA || '', 'Android/Sdk'), avd: 'axrb-games-api34', port: 5580,
-  memoryMB: 8192, cpuCores: 4, textureMode: 'gpu', downloadDir: path.join(portable || app.getPath('downloads'), portable ? 'downloads' : buildProfile.productName), ovrportCli: '',
-  precomposeProjectionLayers: false, directTranslator: 'dynarmic',
+  memoryMB: 8192, cpuCores: 4, textureMode: 'rgba8', downloadDir: path.join(portable || app.getPath('downloads'), portable ? 'downloads' : buildProfile.productName), ovrportCli: '',
+  precomposeProjectionLayers: false, directTranslator: 'dynarmic', directFastFp: false, directCpus: 0,
   guestClock: 'Auto', ...state.data.settings };
 migrateClockPolicy(state.data.settings);
 await state.save();
@@ -771,7 +771,7 @@ handler('fpsHud', async enabled => {
   await persist();
 });
 handler('settings', async values => {
-  const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'cpuCores', 'textureMode', 'downloadDir', 'ovrportCli', 'diagnosticsEndpoint', 'precomposeProjectionLayers', 'directTranslator'];
+  const allowed = ['sdk', 'avd', 'port', 'memoryMB', 'cpuCores', 'textureMode', 'downloadDir', 'ovrportCli', 'diagnosticsEndpoint', 'precomposeProjectionLayers', 'directTranslator', 'directFastFp', 'directCpus'];
   if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
   if (busy || controllers.size || runtime.child) throw new Error('Finish current tasks before changing runtime settings.');
   const settings = { ...state.data.settings };
@@ -784,8 +784,10 @@ handler('settings', async values => {
   // mismatch and refuse to launch. Never offer a number it will not honour.
   if (!Number.isInteger(settings.cpuCores) || settings.cpuCores < 2 || settings.cpuCores > 6) throw new Error('Choose between 2 and 6 vCPUs.');
   if (typeof settings.precomposeProjectionLayers !== 'boolean') throw new Error('Choose whether to precompose projection layers.');
-  if (!['gpu', 'bc7'].includes(settings.textureMode)) throw new Error('Choose a supported texture conversion mode.');
+  if (!['rgba8', 'gpu', 'bc7'].includes(settings.textureMode)) throw new Error('Choose a supported texture conversion mode.');
   if (!['dynarmic', 'digitalis'].includes(settings.directTranslator)) throw new Error('Choose Dynarmic or Digitalis as the ARM64 translator.');
+  if (typeof (settings.directFastFp ?? false) !== 'boolean') throw new Error('Choose whether to use fast floating point.');
+  if (![0, 12, 16].includes(settings.directCpus ?? 0)) throw new Error('Choose Auto, 12 or 16 guest CPUs.');
   for (const key of ['sdk', 'downloadDir']) if (typeof settings[key] !== 'string' || !path.isAbsolute(settings[key])) throw new Error('Select absolute Windows paths.');
   portableOutput(portable, settings.downloadDir);
   if (settings.ovrportCli) portableOutput(portable, settings.ovrportCli);

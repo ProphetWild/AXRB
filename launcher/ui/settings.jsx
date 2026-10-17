@@ -58,7 +58,8 @@ export function Settings({ state, run, pending, notify }) {
   </div>;
   return <form id="settings-form" className="max-w-2xl space-y-7" onSubmit={e => {
     e.preventDefault(); run('settings', async () => {
-      await call('settings', { ...draft, port: Number(draft.port), memoryMB: Number(draft.memoryMB), cpuCores: Number(draft.cpuCores ?? 4) });
+      await call('settings', { ...draft, port: Number(draft.port), memoryMB: Number(draft.memoryMB), cpuCores: Number(draft.cpuCores ?? 4),
+        directCpus: Number(draft.directCpus ?? 0), directFastFp: draft.directFastFp === true });
       setDirty(false); notify('Saved');
     });
   }}>
@@ -71,6 +72,25 @@ export function Settings({ state, run, pending, notify }) {
         <option value="digitalis">Digitalis (experimental)</option>
       </select>
       <p className="text-xs text-muted-foreground">Used for direct mode on the next game launch. Try Digitalis if a game encounters unsupported ARM instructions.</p>
+    </div>
+    <div className="flex items-center justify-between gap-4">
+      <div>
+        <label htmlFor="direct-fast-fp">Fast floating point <span className="text-xs text-muted-foreground">(experimental)</span></label>
+        <p id="direct-fast-fp-help" className="text-xs text-muted-foreground">Off by default. Uses the PC's own floating-point rules instead of exact ARM ones, which saves CPU time in maths-heavy games but can rarely change physics or animation. Dynarmic only; no effect with Digitalis. Applies on the next game launch.</p>
+      </div>
+      <input id="direct-fast-fp" type="checkbox" role="switch" checked={draft.directFastFp === true}
+        className="size-4 shrink-0 accent-primary" aria-describedby="direct-fast-fp-help"
+        onChange={e => edit('directFastFp', e.target.checked)} />
+    </div>
+    <div className="space-y-2">
+      <label htmlFor="direct-cpus">Guest CPUs <span className="text-xs text-muted-foreground">(experimental)</span></label>
+      <select id="direct-cpus" className="w-full rounded-md border bg-background p-2" aria-describedby="direct-cpus-help"
+        value={String(draft.directCpus ?? 0)} onChange={e => edit('directCpus', Number(e.target.value))}>
+        <option value="0">Auto (up to 8)</option>
+        <option value="12">12</option>
+        <option value="16">16</option>
+      </select>
+      <p id="direct-cpus-help" className="text-xs text-muted-foreground">How many CPU cores the game sees in direct mode. More lets a game run more worker threads, but they then compete with SteamVR and the headset streamer for the PC's cores. Compare frame times before keeping a change. Applies on the next game launch.</p>
     </div>
     {field('ovrportCli', 'ovrport CLI', { placeholder: 'Optional .exe or .jar' })}
     {state.portable && <p className="text-sm text-muted-foreground">Portable mode keeps downloads, imported files and patch output inside its folder. Put the complete optional ovrport CLI distribution inside that folder before selecting it. Java, when required by the CLI, remains a system prerequisite.</p>}
@@ -180,12 +200,13 @@ export function Settings({ state, run, pending, notify }) {
     </div>
     <div className="space-y-2">
       <label htmlFor="texture-mode">Texture conversion</label>
-      <select id="texture-mode" className="w-full rounded-md border bg-background px-3 py-2" value={draft.textureMode ?? 'gpu'}
+      <select id="texture-mode" className="w-full rounded-md border bg-background px-3 py-2" value={draft.textureMode ?? 'rgba8'}
         aria-describedby="texture-mode-help" onChange={e => edit('textureMode', e.target.value)}>
+        <option value="rgba8">Uncompressed (GPU / RGBA8)</option>
         <option value="gpu">Performance (GPU / BC3)</option>
-        <option value="bc7">Higher quality (BC7)</option>
+        <option value="bc7">Higher quality (CPU / BC7)</option>
       </select>
-      <p id="texture-mode-help" className="text-xs text-muted-foreground">Performance is the default. BC7 preserves more texture detail. Applies on the next game launch.</p>
+      <p id="texture-mode-help" className="text-xs text-muted-foreground">Uncompressed is the default in direct mode: textures look exactly as the game shipped them, at four times the video memory of BC3 (about 6 GB for Asgard's Wrath 2). BC3 uses the least memory. BC7 is encoded on the CPU and can stall loading. The emulator uses BC3 when Uncompressed is chosen. Applies on the next game launch.</p>
     </div>
     <label className="flex items-center justify-between gap-4" htmlFor="fps-hud">
       <span>Show FPS in headset <span className="text-xs text-muted-foreground">(debug)</span></span>
