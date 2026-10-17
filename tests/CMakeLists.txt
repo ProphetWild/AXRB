@@ -17,6 +17,7 @@ endfunction()
 axrb_native_test(axrb_frame_publisher_smoke frame_publisher_smoke.cpp axrb_frame_publisher)
 add_executable(axrb_texture_transcode_check native/texture_transcode_check.cpp)
 axrb_native_test(axrb_adaptive_pickup_budget_smoke adaptive_pickup_budget_smoke.cpp axrb_adaptive_pickup_budget)
+axrb_native_test(axrb_texture_uncompressed_smoke texture_uncompressed_smoke.cpp axrb_texture_uncompressed)
 
 if(AXRB_BUILD_HOST_BRIDGE)
   add_test(NAME axrb_host_bridge_starts COMMAND axrb-host-bridge)

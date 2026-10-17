@@ -70,6 +70,14 @@ inline bool astc_rgba8_enabled() {
 inline VkFormat bc7_format(bool srgb) { return srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK; }
 inline VkFormat rgba8_format(bool srgb) { return srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM; }
 inline bool is_rgba8(VkFormat format) { return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB; }
+// Bytes per texel of an uncompressed substitute format, 0 for a block format.
+inline uint32_t texel_bytes(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM: return 4;
+    case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: return 2;
+    default: return 0;
+    }
+}
 
 inline bool compressed_format(VkFormat format, int& bw, int& bh, bool& srgb,
                               Codec& codec, VkFormat& target) {
@@ -89,6 +97,16 @@ inline bool compressed_format(VkFormat format, int& bw, int& bh, bool& srgb,
     case VK_FORMAT_EAC_R11G11_UNORM_BLOCK: codec = Codec::EacRg; target = VK_FORMAT_BC5_UNORM_BLOCK; break;
     case VK_FORMAT_EAC_R11G11_SNORM_BLOCK: codec = Codec::EacRgSigned; target = VK_FORMAT_BC5_SNORM_BLOCK; break;
     default: return false;
+    }
+    // Uncompressed: decoded by the CPU workers, with no BC encode (the slow part).
+    if (astc_rgba8_enabled()) {
+        switch (codec) {
+        case Codec::EacR: target = VK_FORMAT_R16_UNORM; break;
+        case Codec::EacRSigned: target = VK_FORMAT_R16_SNORM; break;
+        case Codec::EacRg: target = VK_FORMAT_R16G16_UNORM; break;
+        case Codec::EacRgSigned: target = VK_FORMAT_R16G16_SNORM; break;
+        default: target = rgba8_format(srgb); break;
+        }
     }
     return true;
 }
@@ -210,7 +228,7 @@ public:
         images_[*out] = {device, info->format, bw, bh, srgb, info->extent, info->mipLevels, codec, target};
         ++stats_.images;
         stats_.emulatedBytes += emulated_bytes(*info, bw, bh, codec == Codec::Astc ? 16 : block_bytes(codec));
-        stats_.bc7Bytes += is_rgba8(target) ? rgba8_bytes(*info) : bc7_bytes(*info, codec == Codec::Astc ? 16 : block_bytes(codec));
+        stats_.bc7Bytes += texel_bytes(target) ? texel_image_bytes(*info, texel_bytes(target)) : bc7_bytes(*info, codec == Codec::Astc ? 16 : block_bytes(codec));
         return result;
     }
     void destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator) {
@@ -726,10 +744,10 @@ private:
             bytes += uint64_t((std::max(1u, info.extent.width >> mip) + 3) / 4) * ((std::max(1u, info.extent.height >> mip) + 3) / 4) * blockBytes * std::max(1u, info.extent.depth >> mip);
         return bytes * info.arrayLayers;
     }
-    static uint64_t rgba8_bytes(const VkImageCreateInfo& info) {
+    static uint64_t texel_image_bytes(const VkImageCreateInfo& info, uint32_t texelBytes) {
         uint64_t bytes = 0;
         for (uint32_t mip = 0; mip < info.mipLevels; ++mip)
-            bytes += uint64_t(std::max(1u, info.extent.width >> mip)) * std::max(1u, info.extent.height >> mip) * 4 * std::max(1u, info.extent.depth >> mip);
+            bytes += uint64_t(std::max(1u, info.extent.width >> mip)) * std::max(1u, info.extent.height >> mip) * texelBytes * std::max(1u, info.extent.depth >> mip);
         return bytes * info.arrayLayers;
     }
     static bool host_visible(const DeviceState& state, uint32_t type) {
@@ -745,8 +763,8 @@ private:
         const uint32_t mipHeight = std::max(1u, image.extent.height >> copy.imageSubresource.mipLevel);
         const VkOffset3D& o = copy.imageOffset;
         const VkExtent3D& e = copy.imageExtent;
-        const bool rgba8 = is_rgba8(image.target);  // texels, not 4 x 4 blocks
-        if ((!rgba8 && (o.x % 4 || o.y % 4 || (e.width % 4 && o.x + e.width != mipWidth) || (e.height % 4 && o.y + e.height != mipHeight))) ||
+        const uint32_t texel = texel_bytes(image.target);  // uncompressed: texels, not 4 x 4 blocks
+        if ((!texel && (o.x % 4 || o.y % 4 || (e.width % 4 && o.x + e.width != mipWidth) || (e.height % 4 && o.y + e.height != mipHeight))) ||
             !e.width || !e.height) {
             warn("upload region does not fall on BC7 blocks; texture left without that content");
             return false;
@@ -763,9 +781,9 @@ private:
         r.astcSliceBytes = r.astcRowBytes * ((sliceTexels + image.bh - 1) / image.bh);
         r.astcBytes = VkDeviceSize(r.astcSliceBytes) * (r.slices - 1) + r.astcRowBytes * ((e.height + image.bh - 1) / image.bh - 1) +
                       VkDeviceSize((e.width + image.bw - 1) / image.bw) * blockBytes;
-        // Output rows: of 4 x 4 blocks, or of RGBA8 texels (as the GPU kernel's decode writes them).
-        r.bc7RowBytes = rgba8 ? size_t(e.width) * 4 : size_t((e.width + 3) / 4) * blockBytes;
-        r.bc7SliceBytes = r.bc7RowBytes * (rgba8 ? e.height : (e.height + 3) / 4);
+        // Output rows: of 4 x 4 blocks, or of uncompressed texels (as the GPU kernel's decode writes them).
+        r.bc7RowBytes = texel ? size_t(e.width) * texel : size_t((e.width + 3) / 4) * blockBytes;
+        r.bc7SliceBytes = r.bc7RowBytes * (texel ? e.height : (e.height + 3) / 4);
         r.bc7Bytes = VkDeviceSize(r.bc7SliceBytes) * r.slices;
         return true;
     }
@@ -785,12 +803,20 @@ private:
                 for (int y = 0; y < region.height; y += band) {
                     const int last = std::min(region.height, y + band);
                     const Codec codec = upload.image.codec;
-                    const bool rgba8 = is_rgba8(upload.image.target);
-                    const bool bc3 = !rgba8 && upload.image.target != bc7_format(upload.image.srgb);
-                    Workers::instance().submit(upload.batch, [in, out, y, last, source, codec, bc3, rgba8] {
-                        if (codec == Codec::Astc && rgba8) { astc_to_rgba8(in, out, y, last); return; }
+                    const bool uncompressed = texel_bytes(upload.image.target) != 0;
+                    const bool bc3 = !uncompressed && upload.image.target != bc7_format(upload.image.srgb);
+                    Workers::instance().submit(upload.batch, [in, out, y, last, source, codec, bc3, uncompressed] {
+                        if (codec == Codec::Astc && uncompressed) { astc_to_rgba8(in, out, y, last); return; }
                         if (codec == Codec::Astc) { astc_to_bc7(in, out, y, last, bc3); return; }
                         const auto bytes = block_bytes(codec);
+                        if (uncompressed) {  // ETC2/EAC decoded straight to texels, no BC encode
+                            for (int row = y / 4; row < (last + 3) / 4; ++row)
+                                for (int col = 0; col < (in.width + 3) / 4; ++col)
+                                    decode_block_texels(codec, in.blocks + row * in.rowBytes + col * bytes,
+                                                        out.blocks + size_t(row) * 4 * out.rowBytes + size_t(col) * 4 * uncompressed_texel_bytes(codec),
+                                                        out.rowBytes, std::min(4, in.width - col * 4), std::min(4, in.height - row * 4));
+                            return;
+                        }
                         for (int row = y / 4; row < (last + 3) / 4; ++row)
                             for (int col = 0; col < (in.width + 3) / 4; ++col)
                                 transcode_block(codec, in.blocks + row * in.rowBytes + col * bytes,

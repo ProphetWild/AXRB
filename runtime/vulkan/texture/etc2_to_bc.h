@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 namespace axrb::texture {
@@ -375,6 +376,70 @@ inline void encode_bc3(const uint8_t px[16][4], uint8_t* out) {
     for (int i = 0; i < 16; ++i) alpha[i] = px[i][3];
     detail::encode_bc4(alpha, false, out);
     detail::encode_bc1(px, false, out + 8);
+}
+
+// EAC R11 block -> 16 values at full precision as 16-bit texels (R16_UNORM, or
+// R16_SNORM bits), expanded as the Vulkan specification converts 11 bits to 16.
+inline void decode_eac_r11_16(const uint8_t* s, uint16_t out[16], bool isSigned) {
+    const int multiplier = s[1] >> 4, table = s[1] & 15;
+    const uint64_t bits = detail::big_endian(s + 2, 6);
+    for (int x = 0; x < 4; ++x) for (int y = 0; y < 4; ++y) {
+        const int i = x * 4 + y, index = static_cast<int>(bits >> (45 - 3 * i) & 7);
+        const int modifier = detail::kEacModifiers[table][index];
+        if (isSigned) {
+            const int baseValue = std::max(-127, static_cast<int>(static_cast<int8_t>(s[0])));
+            const int v = std::clamp(baseValue * 8 + (multiplier ? modifier * multiplier * 8 : modifier), -1023, 1023);
+            const int magnitude = std::abs(v);
+            out[y * 4 + x] = static_cast<uint16_t>(static_cast<int16_t>((v < 0 ? -1 : 1) * (magnitude * 32 + magnitude / 32)));
+        } else {
+            const int v = std::clamp(s[0] * 8 + 4 + (multiplier ? modifier * multiplier * 8 : modifier), 0, 2047);
+            out[y * 4 + x] = static_cast<uint16_t>(v << 5 | v >> 6);
+        }
+    }
+}
+
+// Bytes per texel when stored uncompressed (debug.axrb.astc_rgba8): RGBA8 for
+// ETC2, R16 for EAC R11, R16G16 for EAC RG11.
+inline uint32_t uncompressed_texel_bytes(Codec c) {
+    switch (c) {
+    case Codec::Etc2Rgb: case Codec::Etc2RgbA1: case Codec::Etc2Rgba: case Codec::EacRg: case Codec::EacRgSigned: return 4;
+    case Codec::EacR: case Codec::EacRSigned: return 2;
+    default: return 0;
+    }
+}
+
+// Decodes one ETC2/EAC block to uncompressed texels: the top-left w x h of its
+// 4 x 4 (edge blocks are clipped), texel rows rowBytes apart.
+inline void decode_block_texels(Codec codec, const uint8_t* in, uint8_t* out, size_t rowBytes, int w, int h) {
+    uint8_t px[16][4];
+    uint16_t first[16], second[16];
+    const bool isSigned = codec == Codec::EacRSigned || codec == Codec::EacRgSigned;
+    switch (codec) {
+    case Codec::Etc2Rgb: decode_etc2_rgb(in, px, false); break;
+    case Codec::Etc2RgbA1: decode_etc2_rgb(in, px, true); break;
+    case Codec::Etc2Rgba: {
+        uint8_t alpha[16];
+        decode_eac_alpha(in, alpha);
+        decode_etc2_rgb(in + 8, px, false);
+        for (int i = 0; i < 16; ++i) px[i][3] = alpha[i];
+        break;
+    }
+    case Codec::EacR: case Codec::EacRSigned: decode_eac_r11_16(in, first, isSigned); break;
+    case Codec::EacRg: case Codec::EacRgSigned:
+        decode_eac_r11_16(in, first, isSigned);
+        decode_eac_r11_16(in + 8, second, isSigned);
+        break;
+    default: return;
+    }
+    const uint32_t bytes = uncompressed_texel_bytes(codec);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            uint8_t* texel = out + size_t(y) * rowBytes + size_t(x) * bytes;
+            const int i = y * 4 + x;
+            if (codec == Codec::EacR || codec == Codec::EacRSigned) std::memcpy(texel, &first[i], 2);
+            else if (codec == Codec::EacRg || codec == Codec::EacRgSigned) { std::memcpy(texel, &first[i], 2); std::memcpy(texel + 2, &second[i], 2); }
+            else std::memcpy(texel, px[i], 4);
+        }
 }
 
 // Transcodes one block; `out` receives block_bytes(codec) bytes (the same size as the input block).

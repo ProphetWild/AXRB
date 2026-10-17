@@ -1,8 +1,9 @@
-// Uncompressed ASTC images (debug.axrb.astc_rgba8) take 4 bytes a texel, 9-16
-// times the ASTC data the game sized its budgets for. Engines that budget
+// Uncompressed images (debug.axrb.astc_rgba8: ASTC and ETC2 as RGBA8, EAC as
+// R16/RG16) take 2-4 bytes a texel, 4-16 times the compressed data the game
+// sized its budgets for. Engines that budget
 // textures by vkGetImageMemoryRequirements (Unreal's texture streaming pool)
 // then see their pool overflow and keep only low-resolution mips. So these
-// images report the memory their ASTC data would need, and are backed instead
+// images report the memory their compressed data would need, and are backed instead
 // by memory from this file: 256 MiB device-local blocks, suballocated, which
 // also keeps thousands of textures far below the driver's allocation limit.
 // The game's own memory bound to such an image is simply left unused.
@@ -31,12 +32,13 @@ VkDeviceSize align_up(VkDeviceSize value, VkDeviceSize alignment) {
   return alignment > 1 ? (value + alignment - 1) / alignment * alignment : value;
 }
 
-// The game-visible size of an ASTC image: 16 bytes per block, every mip and layer.
-VkDeviceSize astc_footprint(const VkImageCreateInfo &info, int bw, int bh) {
+// The game-visible size of a compressed image: its blocks (16 bytes for ASTC,
+// 8 or 16 for ETC2/EAC), every mip and layer.
+VkDeviceSize compressed_footprint(const VkImageCreateInfo &info, int bw, int bh, uint32_t blockBytes) {
   VkDeviceSize bytes = 0;
   for (uint32_t mip = 0; mip < info.mipLevels; ++mip) {
     const VkDeviceSize w = std::max(1u, info.extent.width >> mip), h = std::max(1u, info.extent.height >> mip);
-    bytes += (w + bw - 1) / bw * ((h + bh - 1) / bh) * 16 * std::max(1u, info.extent.depth >> mip);
+    bytes += (w + bw - 1) / bw * ((h + bh - 1) / bh) * blockBytes * std::max(1u, info.extent.depth >> mip);
   }
   return bytes * info.arrayLayers;
 }
@@ -47,10 +49,11 @@ void track_private(VkDevice device, VkImage image, const VkImageCreateInfo &info
   texture::Codec codec = texture::Codec::None;
   VkFormat target{};
   if (!texture::astc_rgba8_enabled() || info.tiling != VK_IMAGE_TILING_OPTIMAL ||
-      !texture::compressed_format(info.format, bw, bh, srgb, codec, target) || codec != texture::Codec::Astc)
+      !texture::compressed_format(info.format, bw, bh, srgb, codec, target) || !texture::texel_bytes(target))
     return;
+  const uint32_t blockBytes = codec == texture::Codec::Astc ? 16 : texture::block_bytes(codec);
   std::lock_guard guard(g_private_lock);
-  g_private[image] = {device, astc_footprint(info, bw, bh)};
+  g_private[image] = {device, compressed_footprint(info, bw, bh, blockBytes)};
 }
 
 bool is_private(VkImage image) {
