@@ -42,6 +42,7 @@
 #include "etc2_to_bc.h"
 #include "transcode_workers.h"
 #include "gpu_astc.h"
+#include "uncached_read.h"
 
 namespace axrb::texture {
 
@@ -423,7 +424,8 @@ public:
         double recordCopySeconds = 0;
         auto copySource = [&] {
             const auto start = std::chrono::steady_clock::now();
-            upload->source = std::make_shared<std::vector<uint8_t>>(bytes, bytes + upload->sourceSize);
+            upload->source = std::make_shared<std::vector<uint8_t>>(upload->sourceSize);
+            uncached_read(upload->source->data(), bytes, upload->sourceSize);
             recordCopySeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         };
         if (mappedHere || dump_limit() > 0) copySource();
@@ -531,8 +533,15 @@ public:
                 auto m = memories_.find(upload->liveMemory);
                 readable = m != memories_.end() && m->second.mapped == upload->liveMapping;
             }
-            if (readable && std::memcmp(upload->live, upload->source->data(), upload->sourceSize)) {
-                std::memcpy(upload->source->data(), upload->live, upload->sourceSize);
+            // Streamed into cached memory first: comparing in place reads the
+            // game's uncached mapping at about 0.1 GB/s.
+            thread_local std::vector<uint8_t> current;
+            if (readable) {
+                current.resize(upload->sourceSize);
+                uncached_read(current.data(), upload->live, upload->sourceSize);
+            }
+            if (readable && std::memcmp(current.data(), upload->source->data(), upload->sourceSize)) {
+                std::memcpy(upload->source->data(), current.data(), upload->sourceSize);
                 if (upload->gpu) std::memcpy(upload->gpuSource, upload->source->data(), upload->sourceSize);
                 else { start(*upload); upload->batch->wait(); }
                 std::lock_guard lock(mutex_);
@@ -858,7 +867,7 @@ private:
         if (!upload.deferred.exchange(false)) return;
         auto m = memories_.find(upload.liveMemory);
         if (m != memories_.end() && m->second.mapped == upload.liveMapping)
-            std::memcpy(upload.gpuSource, upload.live, upload.sourceSize);
+            uncached_read(upload.gpuSource, upload.live, upload.sourceSize);
     }
     // Before the game's mapping goes away.
     void take_live(VkDeviceMemory memory) {

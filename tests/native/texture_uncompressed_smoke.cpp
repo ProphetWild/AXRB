@@ -7,7 +7,9 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <vector>
 #include "../../runtime/vulkan/texture/etc2_to_bc.h"
+#include "../../runtime/vulkan/texture/uncached_read.h"
 
 using namespace axrb::texture;
 
@@ -65,6 +67,16 @@ int main() {
         for (int x = 0; x < 32; ++x) {
             const bool inside = y < 2 && x < 12;
             assert(inside || canvas[y][x] == 0xAB);
+        }
+    // uncached_read copies exactly, from any alignment and of any length.
+    std::vector<uint8_t> source(4096 + 64), copy(4096 + 64);
+    for (auto& b : source) b = static_cast<uint8_t>(rng());
+    for (size_t offset = 0; offset < 32; ++offset)
+        for (size_t length : {size_t(0), size_t(1), size_t(15), size_t(16), size_t(17), size_t(63), size_t(64), size_t(65), size_t(1000), size_t(4096)}) {
+            std::fill(copy.begin(), copy.end(), uint8_t(0xEE));
+            uncached_read(copy.data() + 3, source.data() + offset, length);
+            assert(std::memcmp(copy.data() + 3, source.data() + offset, length) == 0);
+            assert(copy[2] == 0xEE && copy[3 + length] == 0xEE);
         }
     std::puts("TEXTURE_UNCOMPRESSED_SMOKE_PASS");
     return 0;
