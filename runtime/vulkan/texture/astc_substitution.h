@@ -457,6 +457,7 @@ public:
         }
         command_.uploads.push_back(upload);
         stats_.uploads += 1;
+        ++(upload->gpu ? stats_.gpuUploads : stats_.cpuUploads);
         stats_.uploadTexels += upload->texels;
         state->calls.copyBufferToImage(command, staging.buffer, target, layout, uint32_t(staged.size()), staged.data());
         return true;
@@ -686,7 +687,7 @@ private:
         std::vector<VkCommandBuffer> secondaries;
     };
     struct Stats {
-        uint64_t images = 0, uploads = 0, uploadTexels = 0, retranscodes = 0;
+        uint64_t images = 0, uploads = 0, gpuUploads = 0, cpuUploads = 0, uploadTexels = 0, retranscodes = 0;
         uint64_t emulatedBytes = 0, bc7Bytes = 0;
         double submitWaitSeconds = 0;
         std::chrono::steady_clock::time_point nextReport{};
@@ -881,10 +882,11 @@ private:
         if (now < stats_.nextReport) return;
         stats_.nextReport = now + std::chrono::seconds(10);
         __android_log_print(ANDROID_LOG_INFO, tag,
-                            "%llu compressed images substituted: %.1f MiB instead of %.1f MiB emulated; %llu uploads, %.1f Mtexel transcoded, "
+                            "%llu compressed images substituted: %.1f MiB instead of %.1f MiB emulated; %llu uploads (%llu GPU, %llu CPU), %.1f Mtexel transcoded, "
                             "%llu re-transcoded, %.2f s waited at submit",
                             (unsigned long long)stats_.images, stats_.bc7Bytes / 1048576.0, stats_.emulatedBytes / 1048576.0,
-                            (unsigned long long)stats_.uploads, stats_.uploadTexels / 1e6, (unsigned long long)stats_.retranscodes,
+                            (unsigned long long)stats_.uploads, (unsigned long long)stats_.gpuUploads, (unsigned long long)stats_.cpuUploads,
+                            stats_.uploadTexels / 1e6, (unsigned long long)stats_.retranscodes,
                             stats_.submitWaitSeconds);
     }
 

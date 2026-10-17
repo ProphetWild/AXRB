@@ -11,10 +11,12 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <cstdarg>
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 
@@ -588,6 +590,52 @@ uint64_t queue_submit2(const uint64_t* a, const char* name) {
     }
     return r_(next(queue, count, modified.empty() ? submits : modified.data(), fence));
 }
+// --- pipeline creation timing ----------------------------------------------------------------
+// Shader compilation shows up as frame hitches. Each creation call slower than one 90 Hz
+// frame is logged with its time (the first 200), and every 10 s window that created
+// pipelines gets a summary, so hitches can be matched against them.
+struct PipelineStats {
+    std::mutex lock;
+    uint64_t count = 0, calls = 0, slow = 0, reported = 0;
+    double total = 0, slowest = 0;
+    std::chrono::steady_clock::time_point start{};
+};
+PipelineStats g_pipelines;
+
+void note_pipelines(const char* kind, uint32_t count, double ms) {
+    std::lock_guard held(g_pipelines.lock);
+    auto& s = g_pipelines;
+    const auto now = std::chrono::steady_clock::now();
+    if (s.start == std::chrono::steady_clock::time_point{}) s.start = now;
+    s.count += count; ++s.calls; s.total += ms; s.slowest = std::max(s.slowest, ms);
+    if (ms > 11.1) {
+        ++s.slow;
+        if (s.reported++ < 200) LOGI("vulkan", "slow pipeline creation: %u %s pipeline(s) in %.1f ms", count, kind, ms);
+    }
+    if (now - s.start >= std::chrono::seconds(10)) {
+        LOGI("vulkan", "pipelines: %llu created in %llu call(s) over %.0f s, %.1f ms total, slowest %.1f ms, %llu call(s) over 11 ms",
+             static_cast<unsigned long long>(s.count), static_cast<unsigned long long>(s.calls),
+             std::chrono::duration<double>(now - s.start).count(), s.total, s.slowest, static_cast<unsigned long long>(s.slow));
+        s.count = s.calls = s.slow = 0; s.total = s.slowest = 0; s.start = now;
+    }
+}
+
+template <typename Info, typename Create>
+uint64_t create_pipelines(const uint64_t* a, const char* name, const char* kind) {
+    const auto begin = std::chrono::steady_clock::now();
+    const auto count = static_cast<uint32_t>(a[2]);
+    const VkResult r = host<Create>(name)(a_<VkDevice>(a[0]), a_<VkPipelineCache>(a[1]), count, a_<const Info*>(a[3]),
+                                          nullptr, a_<VkPipeline*>(a[5]));
+    note_pipelines(kind, count, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+    return r_(r);
+}
+uint64_t CreateGraphicsPipelines(const uint64_t* a) {
+    return create_pipelines<VkGraphicsPipelineCreateInfo, PFN_vkCreateGraphicsPipelines>(a, "vkCreateGraphicsPipelines", "graphics");
+}
+uint64_t CreateComputePipelines(const uint64_t* a) {
+    return create_pipelines<VkComputePipelineCreateInfo, PFN_vkCreateComputePipelines>(a, "vkCreateComputePipelines", "compute");
+}
+
 uint64_t QueueSubmit2(const uint64_t* a) { return queue_submit2(a, "vkQueueSubmit2"); }
 uint64_t QueueSubmit2KHR(const uint64_t* a) { return queue_submit2(a, "vkQueueSubmit2KHR"); }
 
@@ -650,6 +698,8 @@ std::vector<std::pair<const char*, Override>> overrides() {
         {"vkQueueSubmit", QueueSubmit},
         {"vkQueueSubmit2", QueueSubmit2},
         {"vkQueueSubmit2KHR", QueueSubmit2KHR},
+        {"vkCreateGraphicsPipelines", CreateGraphicsPipelines},
+        {"vkCreateComputePipelines", CreateComputePipelines},
     };
 }
 
