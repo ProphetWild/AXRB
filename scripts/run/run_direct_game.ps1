@@ -41,13 +41,6 @@ New-Item -ItemType Directory -Force -Path $logs | Out-Null
 
 $python = Join-Path $AxrbRoot 'tools/python/python.exe'
 if (!(Test-Path -LiteralPath $python)) { $python = (Get-Command python -ErrorAction Stop).Source }
-# A runner built from source (scripts/build/build_direct.ps1's out/direct, copied
-# whole) replaces the bundled one while it is present; delete it to go back.
-$sourceBuild = Join-Path $DataDirectory 'runtime-fixes/source-build'
-if (Test-Path -LiteralPath (Join-Path $sourceBuild 'axrb-direct.exe')) {
-    $Executable = (Resolve-Path -LiteralPath (Join-Path $sourceBuild 'axrb-direct.exe')).Path
-    Write-Output "Using the source-built runner in $sourceBuild"
-}
 $directDirectory = Split-Path -Parent $Executable
 $prepare = @((Join-Path $AxrbRoot 'direct/tools/prepare_art_session.py'),
     '--apk', $Apk, '--activity', $Activity, '--sysroot', $Sysroot, '--data', $DataDirectory,
