@@ -86,6 +86,7 @@ try {
     foreach ($name in $environment.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $environment[$name]) }
     $sessionStartedAt = Get-Date
     $bridgeProcess = Start-Process -FilePath $HostExe -ArgumentList @('--serve-openxr', '38490', '0', (Quote $GameName)) -WindowStyle Hidden -PassThru -RedirectStandardOutput "$logs\host.log" -RedirectStandardError "$logs\host.err"
+    $null = $bridgeProcess.Handle  # keeps its exit code readable after it exits
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
     $saved = @{}
 
@@ -132,7 +133,12 @@ try {
         $gameExit = [ordered]@{ kind = 'exited'; reason = $null; status = $gameProcess.ExitCode }
         Write-Output "Game process ended (exit code $($gameProcess.ExitCode))."
     } elseif (!$closeRequested) {
-        $hostLost = $true
+        # SteamVR's "Exit game" ends the bridge (the app SteamVR knows), which
+        # is a normal way to stop. Only a Windows exception status (0xC0000005
+        # and the like, negative as Int32) is a crash.
+        $hostExitCode = $bridgeProcess.ExitCode
+        if ($hostExitCode -lt 0) { $hostLost = $true }
+        else { $hostClosed = $true; Write-Output "The OpenXR runtime closed the AXRB host (exit code $hostExitCode); stopping the game." }
     }
 } finally {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
@@ -167,6 +173,8 @@ try {
         gameProcessLost = $false
         gameExit = $gameExit
         hostProcessLost = [bool]$hostLost
+        hostClosed = [bool]$hostClosed
+        hostExitCode = $hostExitCode
         pauseSucceeded = [bool]$pauseSucceeded
         # Saves are ordinary Windows files, written as the game writes them.
         syncSucceeded = [bool]$pauseSucceeded

@@ -108,6 +108,8 @@ export function describeSessionEnd(record, code) {
     return { outcome: `guest ${exit.kind && exit.kind !== 'unknown' ? exit.kind : 'crash'}${reason}`, detail };
   }
   if (record.hostProcessLost) return { outcome: 'host crash', detail: 'The AXRB host window closed unexpectedly (crash or forced stop).' };
+  // SteamVR's "Exit game" closes the host; the game is then asked to save and stop.
+  if (record.hostClosed) return { outcome: 'closed from VR', detail: null };
   if (record.closeRequested) return { outcome: 'user stop', detail: null };
   // Direct processes report their own status even when the PowerShell session
   // wrapper exits successfully. A nonzero guest status is not a normal Quit.

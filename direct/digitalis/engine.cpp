@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <thread>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -623,7 +624,8 @@ public:
     }
     bool post(Engine* engine, uint64_t pc) {
         std::call_once(started_, [this] {
-            for (int i = 0; i < kWorkers; ++i) std::thread([this, i] { work(i); }).detach();
+            const int workers = worker_count();
+            for (int i = 0; i < workers; ++i) std::thread([this, i] { work(i); }).detach();
         });
         std::lock_guard held(lock_);
         if (jobs_.size() >= 4096) return false;
@@ -639,7 +641,18 @@ public:
     }
 
 private:
-    static constexpr int kWorkers = 2;
+    // Background threads optimizing hot regions: 4 by default (was 2), so hot
+    // code gets its optimized version sooner after loading; at most half the
+    // machine's logical processors. AXRB_DIGITALIS_WORKERS (1-8) overrides.
+    static constexpr int kMaxWorkers = 8;
+    static int worker_count() {
+        char value[16]{};
+        if (GetEnvironmentVariableA("AXRB_DIGITALIS_WORKERS", value, sizeof value))
+            return std::clamp(std::atoi(value), 1, kMaxWorkers);
+        SYSTEM_INFO info;
+        GetSystemInfo(&info);
+        return std::clamp(static_cast<int>(info.dwNumberOfProcessors) / 2, 1, 4);
+    }
     struct Job { Engine* engine; uint64_t pc, generation; };
     void work(int index) {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -673,7 +686,7 @@ private:
     std::mutex lock_;
     std::condition_variable ready_, idle_;
     std::deque<Job> jobs_;
-    Engine* busy_[kWorkers]{};
+    Engine* busy_[kMaxWorkers]{};
 };
 
 void forget_optimizations(Engine* engine) { Optimizer::instance().forget(engine); }

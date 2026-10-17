@@ -113,6 +113,7 @@ test('a game that quit by itself is not reported as a crash', () => {
   assert.deepEqual(describeSessionEnd({ gameProcessLost: true }, 3), { outcome: 'guest crash', detail: 'The game ended unexpectedly on Android (crash or forced stop).' });
   assert.equal(describeSessionEnd({ gameProcessLost: true, gameExit: { kind: 'unknown', reason: null } }, 3).outcome, 'guest crash');
   assert.equal(describeSessionEnd({ hostProcessLost: true }, 4).outcome, 'host crash');
+  assert.equal(describeSessionEnd({ hostClosed: true, hostExitCode: 0, closeRequested: false }, 0).outcome, 'closed from VR');
   assert.deepEqual(describeSessionEnd({ closeRequested: true }, 0), { outcome: 'user stop', detail: null });
   assert.deepEqual(describeSessionEnd({}, 1), { outcome: 'exit 1', detail: null });
 });

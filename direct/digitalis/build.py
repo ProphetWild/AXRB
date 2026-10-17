@@ -55,6 +55,10 @@ if args.heavy:
     flags += ['/DAXRB_DIGITALIS_HEAVY']
     includes.append(source / 'heavy_optimizer/arm64/include')
 flags += ['/I' + str(path) for path in includes]
+# Release library objects drop Berberis's debug checks (DCHECK, LOG_NDEBUG) and
+# assert(). The self-tests keep plain `flags`: their checks are asserts that
+# also run the code under test.
+library = flags + ([] if debug else ['/DNDEBUG', '/DLOG_NDEBUG=1'])
 objects = []
 for name, file in [
     ('engine', here / 'engine.cpp'), ('builtins', here / 'builtins.cpp'),
@@ -62,14 +66,14 @@ for name, file in [
     ('translator', source / 'lite_translator/arm64_to_x86_64/lite_translator.cc'),
     ('machine', source / 'assembler/machine_code.cc')]:
     obj = work / (name + '.obj')
-    run(flags + [file, '/Fo' + str(obj)])
+    run(library + [file, '/Fo' + str(obj)])
     objects.append(obj)
 entry = work / 'entry.obj'
 run([linker.parent / 'ml64.exe', '/nologo', '/c', '/Fo' + str(entry), here / 'entry.asm'])
 objects.append(entry)
 if args.heavy:
     from build_heavy import build
-    objects += build(source, work, flags, run, env)
+    objects += build(source, work, library, run, env)
 run([linker.parent / 'lib.exe', '/nologo', '/OUT:' + str(work / 'digitalis.lib'), *objects])
 run(flags + [here / 'selftest.cpp', '/Fo' + str(work / 'selftest.obj')])
 run([linker, '/nologo', '/OUT:' + str(work / 'digitalis-selftest.exe'),
