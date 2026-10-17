@@ -754,6 +754,7 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart,
         (space->kind == SpaceKind::View ? axrb::protocol::kProjectionViewSpaceBit : 0u);
     std::array<SwapchainRecord*, 2> swapchains{};
     const XrSwapchainSubImage* subimages[2]{};
+    XrSwapchainSubImage clamped[2]{};  // subimages whose rectangle ran past the swapchain
     if (equirect) {
         const auto* sphere = static_cast<const XrCompositionLayerEquirect2KHR*>(info.layers[0]);
         const auto pose = multiply_pose(spaceWorld, sphere->pose);
@@ -847,13 +848,38 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart,
         }
 #endif
         if (!sc->hasReleasedImage) { return XR_ERROR_CALL_ORDER_INVALID; }
-        const auto& rect = sub.imageRect;
+        // Unreal's Meta plugin rounds its crop a pixel or two past the right
+        // edge (3175 wide at offset 859 in a 4032-wide swapchain). Rejecting
+        // that freezes the game on its loading image, so a rectangle that
+        // starts inside the image is clamped to it instead.
+        const auto& requested = sub.imageRect;
+        if (requested.offset.x >= 0 && requested.offset.y >= 0 && requested.extent.width > 0 && requested.extent.height > 0 &&
+            static_cast<uint64_t>(requested.offset.x) < sc->width && static_cast<uint64_t>(requested.offset.y) < sc->height &&
+            (static_cast<uint64_t>(requested.offset.x) + requested.extent.width > sc->width ||
+             static_cast<uint64_t>(requested.offset.y) + requested.extent.height > sc->height)) {
+            clamped[eye] = sub;
+            clamped[eye].imageRect.extent.width = static_cast<int32_t>(
+                std::min<uint64_t>(requested.extent.width, sc->width - static_cast<uint64_t>(requested.offset.x)));
+            clamped[eye].imageRect.extent.height = static_cast<int32_t>(
+                std::min<uint64_t>(requested.extent.height, sc->height - static_cast<uint64_t>(requested.offset.y)));
+#if defined(__ANDROID__)
+            static unsigned reportedClamp = 0;
+            if (!validateOnly && reportedClamp++ < 4)
+                __android_log_print(ANDROID_LOG_INFO, "AXRB.Frame", "eye %u rect %dx%d at %d,%d clamped to swapchain %ux%u", eye,
+                                    requested.extent.width, requested.extent.height, requested.offset.x, requested.offset.y,
+                                    sc->width, sc->height);
+#endif
+            subimages[eye] = &clamped[eye];
+        }
+        const auto& rect = subimages[eye]->imageRect;
         if (rect.offset.x < 0 || rect.offset.y < 0 || rect.extent.width <= 0 || rect.extent.height <= 0 ||
             static_cast<uint64_t>(rect.offset.x) + rect.extent.width > sc->width ||
             static_cast<uint64_t>(rect.offset.y) + rect.extent.height > sc->height ||
             sub.imageArrayIndex >= sc->arraySize) { return XR_ERROR_SWAPCHAIN_RECT_INVALID; }
-        const uint32_t eyeWidth = std::min<uint32_t>(g_renderWidth, rect.extent.width);
-        const uint32_t eyeHeight = std::min<uint32_t>(g_renderHeight, rect.extent.height);
+        // Sized by the requested rectangle: often only one eye runs past its
+        // edge, and its clamped source is scaled to the same output size.
+        const uint32_t eyeWidth = std::min<uint32_t>(g_renderWidth, requested.extent.width);
+        const uint32_t eyeHeight = std::min<uint32_t>(g_renderHeight, requested.extent.height);
         if (eye == 0) { width = eyeWidth; height = eyeHeight; }
         if (width != eyeWidth || height != eyeHeight) { return invalid("unequal eye dimensions"); }
         swapchains[eye] = sc;

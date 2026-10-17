@@ -13,6 +13,7 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
+#include <sys/system_properties.h>
 #include <algorithm>
 #include <condition_variable>
 #include <cstdio>
@@ -78,9 +79,14 @@ private:
 #endif
     }
 
+    // Up to six workers by default (three before: CPU BC7 and ETC2 loading
+    // waited on them on 8+ core machines); debug.axrb.texture_workers sets it.
     Workers() {
         const long cpus = online_cpus();
-        const int count = int(std::clamp(cpus - 1, 1L, 3L));
+        char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.axrb.texture_workers", value);
+        const long wanted = std::atol(value);
+        const int count = int(wanted > 0 ? std::clamp(wanted, 1L, std::max(1L, cpus)) : std::clamp(cpus - 1, 1L, 6L));
         for (int i = 0; i < count; ++i) threads_.emplace_back([this] { loop(); });
         for (auto& thread : threads_) thread.detach();
     }

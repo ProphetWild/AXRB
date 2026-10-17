@@ -91,4 +91,24 @@ inline void astc_to_bc7(const AstcRegion& in, const Bc7Output& out, int first, i
     }
 }
 
+// Decodes texel rows [first, last) of the region to RGBA8 texels; out.rowBytes
+// is the distance between texel rows. Uncompressed storage (debug.axrb.astc_rgba8).
+inline void astc_to_rgba8(const AstcRegion& in, const Bc7Output& out, int first, int last) {
+    const int bw = in.blockWidth, bh = in.blockHeight;
+    uint32_t texels[144];
+    const int blocksAcross = (in.width + bw - 1) / bw;
+    for (int by = first / bh; by * bh < last; ++by) {
+        const uint8_t* row = in.blocks + size_t(by) * in.rowBytes;
+        for (int bx = 0; bx < blocksAcross; ++bx) {
+            astc::decode_block(row + size_t(bx) * 16, bw, bh, in.srgb, texels);
+            const int x = bx * bw, count = std::min(bw, in.width - x);
+            for (int ty = 0; ty < bh; ++ty) {
+                const int y = by * bh + ty;
+                if (y < first || y >= last) continue;
+                std::memcpy(out.blocks + size_t(y) * out.rowBytes + size_t(x) * 4, texels + ty * bw, size_t(count) * 4);
+            }
+        }
+    }
+}
+
 } // namespace axrb::texture

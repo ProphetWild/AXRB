@@ -784,7 +784,7 @@ ServiceSocket::Handler logd_writer() {
             std::string out(prefix, static_cast<size_t>(n));
             out.append(line);
             out.push_back('\n');
-            log_raw(out.data(), out.size());
+            log_raw(out.data(), out.size(), priority >= 5);  // W, E, F flush at once
             at = nl == std::string_view::npos ? text.size() + 1 : nl + 1;
         } while (at <= text.size());
     };

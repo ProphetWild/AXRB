@@ -868,7 +868,14 @@ int main()
     projectionViews[1].subImage.imageArrayIndex = 2;
     if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) { return EXIT_FAILURE; }
     projectionViews[1].subImage.imageArrayIndex = 1;
+    // A rectangle running past the edge is clamped, also when only one eye's
+    // does (Unreal's symmetric crop); one starting outside the image is rejected.
     projectionViews[1].subImage.imageRect.offset.x = 1;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) { return EXIT_FAILURE; }
+    projectionViews[0].subImage.imageRect.offset.x = projectionViews[1].subImage.imageRect.offset.x = 1;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) { return EXIT_FAILURE; }
+    projectionViews[0].subImage.imageRect.offset.x = 0;
+    projectionViews[1].subImage.imageRect.offset.x = 1 << 20;
     if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) { return EXIT_FAILURE; }
     projectionViews[1].subImage.imageRect.offset.x = 0;
     projectionViews[1].fov.angleLeft = projectionViews[1].fov.angleRight;

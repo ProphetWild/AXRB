@@ -24,7 +24,8 @@
 // extension structures this code does not know, and uploads whose source is
 // not host-readable or whose region does not fall on 4-texel BC7 blocks are
 // logged; the image stays BC7, which the game then samples without that
-// content. debug.axrb.astc_to_bc7=0 turns the substitution off.
+// content. debug.axrb.astc_to_bc7=0 turns the substitution off, and
+// debug.axrb.astc_rgba8=1 stores ASTC as uncompressed RGBA8 instead of BC.
 #include <vulkan/vulkan.h>
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -53,12 +54,27 @@ inline bool astc_to_bc7_enabled() {
     return enabled;
 }
 
+// debug.axrb.astc_rgba8=1 stores ASTC uncompressed, as RGBA8: exactly the
+// decoded ASTC texels, with no BC encoding loss, at 32 bits per texel (four
+// times BC3's VRAM and sampling bandwidth). The GPU decodes; uploads it cannot
+// take are decoded by the CPU workers.
+inline bool astc_rgba8_enabled() {
+    static const bool enabled = [] {
+        char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.axrb.astc_rgba8", value);
+        return std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
 inline VkFormat bc7_format(bool srgb) { return srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK; }
+inline VkFormat rgba8_format(bool srgb) { return srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM; }
+inline bool is_rgba8(VkFormat format) { return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB; }
 
 inline bool compressed_format(VkFormat format, int& bw, int& bh, bool& srgb,
                               Codec& codec, VkFormat& target) {
     if (astc::block_size(uint32_t(format), &bw, &bh, &srgb)) {
-        codec = Codec::Astc; target = bc7_format(srgb); return true;
+        codec = Codec::Astc; target = astc_rgba8_enabled() ? rgba8_format(srgb) : bc7_format(srgb); return true;
     }
     bw = bh = 4; srgb = false;
     switch (format) {
@@ -124,9 +140,12 @@ public:
         devices_[calls.device] = std::make_shared<DeviceState>(calls);
         bc7_settings(false);
         const auto& state = devices_[calls.device];
+        const bool gpu = state->gpu && state->gpu->ready();
         __android_log_print(ANDROID_LOG_INFO, tag, "ASTC mode: %s",
-                            state->gpu && state->gpu->ready() ? "GPU BC3 (CPU BC3 fallback)" : "CPU BC7");
-        __android_log_print(ANDROID_LOG_INFO, tag, "ASTC/ETC2/EAC textures stored as native BC; %d transcoding worker(s) off the main thread",
+                            astc_rgba8_enabled() ? (gpu ? "GPU RGBA8 uncompressed (CPU RGBA8 fallback)" : "CPU RGBA8 uncompressed")
+                                                 : (gpu ? "GPU BC3 (CPU BC3 fallback)" : "CPU BC7"));
+        __android_log_print(ANDROID_LOG_INFO, tag, "ASTC/ETC2/EAC textures stored as %s; %d transcoding worker(s) off the main thread",
+                            astc_rgba8_enabled() ? "RGBA8 (ASTC) and native BC (ETC2/EAC)" : "native BC",
                             Workers::instance().count());
     }
     void remove_device(VkDevice device) {
@@ -160,8 +179,8 @@ public:
         VkFormat target = VK_FORMAT_UNDEFINED;
         if (!state || !info || !compressed_format(info->format, bw, bh, srgb, codec, target))
             return state ? state->calls.createImage(device, info, allocator, out) : VK_ERROR_INITIALIZATION_FAILED;
-        if (codec == Codec::Astc && state->gpu && state->gpu->ready())
-            target = srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
+        const bool gpuBc3 = codec == Codec::Astc && !astc_rgba8_enabled() && state->gpu && state->gpu->ready();
+        if (gpuBc3) target = srgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
         VkImageCreateInfo bc7 = *info;
         bc7.format = target;
         VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
@@ -174,8 +193,7 @@ public:
                 int vw, vh; bool vsrgb; Codec vc; VkFormat vf;
                 if (!compressed_format(list->pViewFormats[i], vw, vh, vsrgb, vc, vf) || vc != codec || vw != bw || vh != bh)
                     return VK_ERROR_FORMAT_NOT_SUPPORTED;
-                if (codec == Codec::Astc && state->gpu && state->gpu->ready())
-                    vf = vsrgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
+                if (gpuBc3) vf = vsrgb ? VK_FORMAT_BC3_SRGB_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
                 viewFormats.push_back(vf);
             }
             formatList.viewFormatCount = static_cast<uint32_t>(viewFormats.size());
@@ -192,7 +210,7 @@ public:
         images_[*out] = {device, info->format, bw, bh, srgb, info->extent, info->mipLevels, codec, target};
         ++stats_.images;
         stats_.emulatedBytes += emulated_bytes(*info, bw, bh, codec == Codec::Astc ? 16 : block_bytes(codec));
-        stats_.bc7Bytes += bc7_bytes(*info, codec == Codec::Astc ? 16 : block_bytes(codec));
+        stats_.bc7Bytes += is_rgba8(target) ? rgba8_bytes(*info) : bc7_bytes(*info, codec == Codec::Astc ? 16 : block_bytes(codec));
         return result;
     }
     void destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator) {
@@ -393,11 +411,13 @@ public:
 
         std::lock_guard lock(mutex_);
         auto& command_ = command_state(command, state.get());
-        const bool bc3 = image.codec == Codec::Astc && image.target != bc7_format(image.srgb);
+        // The GPU kernel writes BC3 blocks or, for RGBA8 images, the decoded texels.
+        const bool rgba8 = is_rgba8(image.target);
+        const bool kernel = image.codec == Codec::Astc && image.target != bc7_format(image.srgb) && state->gpu && state->gpu->ready();
         const uint32_t family = families_.count(pools_[command]) ? families_[pools_[command]] : 32;
         const VkDeviceSize inputOffset = (stagingSize + 15) & ~VkDeviceSize(15);
         const VkDeviceSize total = inputOffset + upload->sourceSize;
-        const bool gpu = bc3 && primaries_[command] && oneTime_[command] && family < 32 &&
+        const bool gpu = kernel && primaries_[command] && oneTime_[command] && family < 32 &&
                          (state->calls.computeFamilies & (1u << family)) && total <= state->calls.maxStorageRange;
         Staging staging = state->take(gpu ? total : stagingSize, command_);
         if (!staging.buffer) {
@@ -420,7 +440,7 @@ public:
                     uint32_t((staging.offset+r.bc7Offset)/4), uint32_t(r.astcRowBytes/16), uint32_t(r.astcSliceBytes/16),
                     uint32_t((r.width+image.bw-1)/image.bw), uint32_t((r.height+image.bh-1)/image.bh),
                     uint32_t((r.width+3)/4), uint32_t((r.height+3)/4), uint32_t(r.width), uint32_t(r.height),
-                    uint32_t(image.bw) | uint32_t(image.bh)<<8 | uint32_t(image.srgb)<<16});
+                    uint32_t(image.bw) | uint32_t(image.bh)<<8 | uint32_t(image.srgb)<<16 | uint32_t(rgba8)<<17});
                 slices.push_back(r.slices);
             }
             upload->gpu = state->gpu->record(family, staging.buffer, staging.size, pushes, slices);
@@ -627,13 +647,15 @@ private:
             chunk.mapped = static_cast<uint8_t*>(pointer);
             return chunk;
         }
-        // Keeps up to 64 MiB of staging for reuse.
+        // Keeps up to 64 MiB of staging for reuse (256 MiB for RGBA8, whose
+        // uploads are four times larger).
         void give_back(std::vector<Chunk>& chunks_) {
             std::lock_guard lock(chunks);
+            const VkDeviceSize limit = astc_rgba8_enabled() ? (256u << 20) : (64u << 20);
             VkDeviceSize kept = 0;
             for (auto& chunk : free) kept += chunk.size;
             for (auto& chunk : chunks_) {
-                if (kept + chunk.size <= (64u << 20)) {
+                if (kept + chunk.size <= limit) {
                     kept += chunk.size;
                     free.push_back(chunk);
                 } else {
@@ -695,6 +717,12 @@ private:
             bytes += uint64_t((std::max(1u, info.extent.width >> mip) + 3) / 4) * ((std::max(1u, info.extent.height >> mip) + 3) / 4) * blockBytes * std::max(1u, info.extent.depth >> mip);
         return bytes * info.arrayLayers;
     }
+    static uint64_t rgba8_bytes(const VkImageCreateInfo& info) {
+        uint64_t bytes = 0;
+        for (uint32_t mip = 0; mip < info.mipLevels; ++mip)
+            bytes += uint64_t(std::max(1u, info.extent.width >> mip)) * std::max(1u, info.extent.height >> mip) * 4 * std::max(1u, info.extent.depth >> mip);
+        return bytes * info.arrayLayers;
+    }
     static bool host_visible(const DeviceState& state, uint32_t type) {
         return type < state.calls.memory.memoryTypeCount &&
                (state.calls.memory.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
@@ -708,7 +736,8 @@ private:
         const uint32_t mipHeight = std::max(1u, image.extent.height >> copy.imageSubresource.mipLevel);
         const VkOffset3D& o = copy.imageOffset;
         const VkExtent3D& e = copy.imageExtent;
-        if (o.x % 4 || o.y % 4 || (e.width % 4 && o.x + e.width != mipWidth) || (e.height % 4 && o.y + e.height != mipHeight) ||
+        const bool rgba8 = is_rgba8(image.target);  // texels, not 4 x 4 blocks
+        if ((!rgba8 && (o.x % 4 || o.y % 4 || (e.width % 4 && o.x + e.width != mipWidth) || (e.height % 4 && o.y + e.height != mipHeight))) ||
             !e.width || !e.height) {
             warn("upload region does not fall on BC7 blocks; texture left without that content");
             return false;
@@ -725,8 +754,9 @@ private:
         r.astcSliceBytes = r.astcRowBytes * ((sliceTexels + image.bh - 1) / image.bh);
         r.astcBytes = VkDeviceSize(r.astcSliceBytes) * (r.slices - 1) + r.astcRowBytes * ((e.height + image.bh - 1) / image.bh - 1) +
                       VkDeviceSize((e.width + image.bw - 1) / image.bw) * blockBytes;
-        r.bc7RowBytes = size_t((e.width + 3) / 4) * blockBytes;
-        r.bc7SliceBytes = r.bc7RowBytes * ((e.height + 3) / 4);
+        // Output rows: of 4 x 4 blocks, or of RGBA8 texels (as the GPU kernel's decode writes them).
+        r.bc7RowBytes = rgba8 ? size_t(e.width) * 4 : size_t((e.width + 3) / 4) * blockBytes;
+        r.bc7SliceBytes = r.bc7RowBytes * (rgba8 ? e.height : (e.height + 3) / 4);
         r.bc7Bytes = VkDeviceSize(r.bc7SliceBytes) * r.slices;
         return true;
     }
@@ -746,8 +776,10 @@ private:
                 for (int y = 0; y < region.height; y += band) {
                     const int last = std::min(region.height, y + band);
                     const Codec codec = upload.image.codec;
-                    const bool bc3 = upload.image.target != bc7_format(upload.image.srgb);
-                    Workers::instance().submit(upload.batch, [in, out, y, last, source, codec, bc3] {
+                    const bool rgba8 = is_rgba8(upload.image.target);
+                    const bool bc3 = !rgba8 && upload.image.target != bc7_format(upload.image.srgb);
+                    Workers::instance().submit(upload.batch, [in, out, y, last, source, codec, bc3, rgba8] {
+                        if (codec == Codec::Astc && rgba8) { astc_to_rgba8(in, out, y, last); return; }
                         if (codec == Codec::Astc) { astc_to_bc7(in, out, y, last, bc3); return; }
                         const auto bytes = block_bytes(codec);
                         for (int row = y / 4; row < (last + 3) / 4; ++row)
@@ -849,7 +881,7 @@ private:
         if (now < stats_.nextReport) return;
         stats_.nextReport = now + std::chrono::seconds(10);
         __android_log_print(ANDROID_LOG_INFO, tag,
-                            "%llu compressed images as BC: %.1f MiB instead of %.1f MiB emulated; %llu uploads, %.1f Mtexel transcoded, "
+                            "%llu compressed images substituted: %.1f MiB instead of %.1f MiB emulated; %llu uploads, %.1f Mtexel transcoded, "
                             "%llu re-transcoded, %.2f s waited at submit",
                             (unsigned long long)stats_.images, stats_.bc7Bytes / 1048576.0, stats_.emulatedBytes / 1048576.0,
                             (unsigned long long)stats_.uploads, stats_.uploadTexels / 1e6, (unsigned long long)stats_.retranscodes,

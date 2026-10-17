@@ -153,6 +153,16 @@ int wmain(int argc, wchar_t** argv) {
     log_init();
     profiler_start();
     timeBeginPeriod(1);
+    // The launcher starts the runner hidden, which lets Windows 11 power-throttle
+    // it and then ignore the timer resolution above. Opt out of both.
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+#ifdef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+    throttling.ControlMask |= PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+#endif
+    throttling.StateMask = 0;
+    SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof throttling);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 
     if (!address_space().init(options.low_memory)) return 3;

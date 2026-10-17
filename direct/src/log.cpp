@@ -80,13 +80,19 @@ void log_write(LogLevel level, const char* tag, const char* format, ...) {
     va_end(args);
 }
 
-void log_raw(const char* text, size_t length) {
+void log_raw(const char* text, size_t length, bool urgent) {
+    // Guest logcat arrives here on the thread that logged, often a game
+    // thread: routine lines are flushed at most every 250 ms instead of twice
+    // per line; urgent ones (warnings and errors) at once, with all before them.
+    static std::chrono::steady_clock::time_point s_flushed;
     std::lock_guard<std::mutex> held(g_lock);
     std::fwrite(text, 1, length, stdout);
-    std::fflush(stdout);
-    if (g_file) {
-        std::fwrite(text, 1, length, g_file);
-        std::fflush(g_file);
+    if (g_file) std::fwrite(text, 1, length, g_file);
+    const auto now = std::chrono::steady_clock::now();
+    if (urgent || now - s_flushed >= std::chrono::milliseconds(250)) {
+        s_flushed = now;
+        std::fflush(stdout);
+        if (g_file) std::fflush(g_file);
     }
 }
 

@@ -41,6 +41,13 @@ New-Item -ItemType Directory -Force -Path $logs | Out-Null
 
 $python = Join-Path $AxrbRoot 'tools/python/python.exe'
 if (!(Test-Path -LiteralPath $python)) { $python = (Get-Command python -ErrorAction Stop).Source }
+# A runner built from source (scripts/build/build_direct.ps1's out/direct, copied
+# whole) replaces the bundled one while it is present; delete it to go back.
+$sourceBuild = Join-Path $DataDirectory 'runtime-fixes/source-build'
+if (Test-Path -LiteralPath (Join-Path $sourceBuild 'axrb-direct.exe')) {
+    $Executable = (Resolve-Path -LiteralPath (Join-Path $sourceBuild 'axrb-direct.exe')).Path
+    Write-Output "Using the source-built runner in $sourceBuild"
+}
 $directDirectory = Split-Path -Parent $Executable
 $prepare = @((Join-Path $AxrbRoot 'direct/tools/prepare_art_session.py'),
     '--apk', $Apk, '--activity', $Activity, '--sysroot', $Sysroot, '--data', $DataDirectory,
@@ -71,6 +78,11 @@ try {
         AXRB_CLOSE_EVENT = $closeEventName
         AXRB_FPS_HUD_EVENT = $FpsHudEventName
         AXRB_PRECOMPOSE_PROJECTION_LAYERS = $(if ($PrecomposeProjectionLayers) { '1' } else { '0' })
+        # The bridge's wait for a fresher game frame, on a high-resolution
+        # timer: its default condition variable can overshoot by a 15.6 ms
+        # timer tick and miss the display deadline. AXRB_PRECISE_IMAGE_WAIT=0
+        # in the environment keeps the default.
+        AXRB_PRECISE_IMAGE_WAIT = $(if ($env:AXRB_PRECISE_IMAGE_WAIT) { $env:AXRB_PRECISE_IMAGE_WAIT } else { '1' })
     }
     foreach ($name in $environment.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $environment[$name]) }
     $sessionStartedAt = Get-Date

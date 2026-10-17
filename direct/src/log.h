@@ -16,7 +16,7 @@ void log_write(LogLevel level, const char* tag, const char* format, ...);
 void log_writev(LogLevel level, const char* tag, const char* format, va_list args);
 bool trace_enabled(const char* category);
 // Raw text, e.g. guest stdout/logcat lines, written without a prefix.
-void log_raw(const char* text, size_t length);
+void log_raw(const char* text, size_t length, bool urgent = true);
 void log_flush();
 
 [[noreturn]] void fatal(const char* format, ...);

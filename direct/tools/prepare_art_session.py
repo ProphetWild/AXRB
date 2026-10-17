@@ -52,6 +52,28 @@ def stage_libraries(apk, data):
         return libraries
 
 
+def lift_shim_swapchain_limit(libraries):
+    # OVRPort's OpenXR shim (a libopenxr_loader.so inside some patched games)
+    # aborts with "Wrong createInfo size" when a game asks for a swapchain over
+    # 4096 pixels a side. A game that widens its eye texture for a symmetric
+    # projection passes that at a PC headset's resolution, so raise the limit
+    # to the 16384 this runtime advertises. Any other loader is left alone.
+    shim = libraries / 'libopenxr_loader.so'
+    if not shim.is_file():
+        return
+    code = shim.read_bytes()
+    # cmp w1, #4096; b.hi; cmp w2, #4096; b.hi
+    at = code.find(bytes.fromhex('3f044071'))
+    if at < 0 or code.count(bytes.fromhex('3f044071')) != 1 or code[at + 8:at + 12] != bytes.fromhex('5f044071'):
+        return
+    patched = bytearray(code)
+    patched[at:at + 4] = bytes.fromhex('3f104071')
+    patched[at + 8:at + 12] = bytes.fromhex('5f104071')
+    partial = shim.with_name(shim.name + '.axrb-patch')
+    partial.write_bytes(patched)
+    os.replace(partial, shim)
+
+
 def boot_classpath(sysroot):
     boot = [f'/apex/com.android.art/javalib/{n}.jar' for n in
             ('core-oj', 'core-libart', 'okhttp', 'bouncycastle', 'apache-xml')]
@@ -94,6 +116,7 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
         raise ValueError('A fully qualified launch activity is required')
     boot = boot_classpath(sysroot)
     libraries = stage_libraries(apk, data)
+    lift_shim_swapchain_limit(libraries)
     args = ['--host-graphics', '--low-memory', '--sysroot', str(sysroot), '--data', str(data)]
 
     def mount(guest, host, directory=False):
@@ -144,6 +167,10 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
     for prop in ('ro.hardware.egl=axrb', 'servicemanager.ready=true',
                  'dalvik.vm.usejit=false', 'dalvik.vm.usejitprofiles=false'):
         args.extend(['--prop', prop])
+    # ASTC textures uncompressed (RGBA8, decoded on the GPU) rather than
+    # re-encoded as BC3; AXRB_ASTC_RGBA8=0 in the environment restores BC3.
+    if os.environ.get('AXRB_ASTC_RGBA8', '1') != '0':
+        args.extend(['--prop', 'debug.axrb.astc_rgba8=1'])
     for env in ('LD_LIBRARY_PATH=/apex/com.android.art/lib64:/apex/com.android.os.statsd/lib64:/apex/com.android.runtime/lib64/bionic:/system/lib64',
                 'BOOTCLASSPATH=' + boot, 'CLASSPATH=/system/framework/axrb-bootstrap.dex'):
         args.extend(['--env', env])

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -39,7 +40,9 @@ thread_local GuestThread* t_current = nullptr;
 // Host functions and their trampolines.
 std::shared_mutex g_functions_lock;
 std::vector<std::string> g_function_names;
-std::vector<HostFunction> g_functions;
+// A deque: registering more functions never moves existing ones, so a function
+// found under the lock (or cached per thread, below) stays valid without it.
+std::deque<HostFunction> g_functions;
 uint64_t g_trampolines = 0;
 constexpr uint32_t kMaxHostFunctions = 1 << 16;
 uint64_t g_return_trap = 0;
@@ -590,12 +593,27 @@ void invalidate_code(uint64_t addr, uint64_t len) {
 // ---------------------------------------------------------------------------
 // The run loop.
 
+// Per-thread, direct-mapped caches for the guest's host calls (every Vulkan
+// call is one): a hit skips the shared lock, whose lock word all guest
+// threads would otherwise contend for. Entries never go stale: a stub
+// address keeps its id and an id keeps its HostFunction slot.
+constexpr uint32_t kCallCacheSize = 256;
+struct NamedCacheEntry { uint64_t address = 0; uint32_t id = ~0u; };
+struct FunctionCacheEntry { uint32_t id = ~0u; HostFunction* fn = nullptr; };
+thread_local NamedCacheEntry t_named_cache[kCallCacheSize];
+thread_local FunctionCacheEntry t_function_cache[kCallCacheSize];
+
 static uint32_t named_function_id(GuestThread& thread) {
     uint64_t address = untag(get_reg(thread, 17));
+    NamedCacheEntry& cached = t_named_cache[(address >> 3) % kCallCacheSize];
+    if (cached.address == address && address) return cached.id;
     {
         std::shared_lock<std::shared_mutex> held(g_functions_lock);
         auto it = g_named_by_address.find(address);
-        if (it != g_named_by_address.end()) return it->second;
+        if (it != g_named_by_address.end()) {
+            cached = {address, it->second};
+            return it->second;
+        }
     }
     std::string name;
     if (!guest_string(address, name, 256)) return ~0u;
@@ -611,10 +629,14 @@ static uint32_t named_function_id(GuestThread& thread) {
 }
 
 static void handle_host_call(GuestThread& thread, uint32_t id) {
-    HostFunction* fn = nullptr;
-    {
+    FunctionCacheEntry& cached = t_function_cache[id % kCallCacheSize];
+    HostFunction* fn = cached.id == id ? cached.fn : nullptr;
+    if (!fn) {
         std::shared_lock<std::shared_mutex> held(g_functions_lock);
-        if (id < g_functions.size()) fn = &g_functions[id];
+        if (id < g_functions.size()) {
+            fn = &g_functions[id];
+            cached = {id, fn};
+        }
     }
     if (!fn) {
         LOGE("cpu", "call to unregistered host function %u from %s", id, describe_address(get_reg(thread, 30)).c_str());
