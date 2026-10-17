@@ -458,6 +458,11 @@ public:
         command_.uploads.push_back(upload);
         stats_.uploads += 1;
         ++(upload->gpu ? stats_.gpuUploads : stats_.cpuUploads);
+        // Why an upload missed the GPU kernel, first reason that applies (see report()).
+        if (!upload->gpu)
+            ++stats_.cpuWhy[image.codec != Codec::Astc ? 0 : !kernel ? 1 : !primaries_[command] ? 2 : !oneTime_[command] ? 3
+                            : family >= 32 || !(state->calls.computeFamilies & (1u << family)) ? 4
+                            : total > state->calls.maxStorageRange ? 5 : 6];
         stats_.uploadTexels += upload->texels;
         state->calls.copyBufferToImage(command, staging.buffer, target, layout, uint32_t(staged.size()), staged.data());
         return true;
@@ -688,6 +693,9 @@ private:
     };
     struct Stats {
         uint64_t images = 0, uploads = 0, gpuUploads = 0, cpuUploads = 0, uploadTexels = 0, retranscodes = 0;
+        // CPU uploads by reason: ETC2/EAC, no GPU kernel, secondary command buffer,
+        // reusable command buffer, queue without compute, too large, kernel recording failed.
+        uint64_t cpuWhy[7] = {};
         uint64_t emulatedBytes = 0, bc7Bytes = 0;
         double submitWaitSeconds = 0;
         std::chrono::steady_clock::time_point nextReport{};
@@ -888,6 +896,14 @@ private:
                             (unsigned long long)stats_.uploads, (unsigned long long)stats_.gpuUploads, (unsigned long long)stats_.cpuUploads,
                             stats_.uploadTexels / 1e6, (unsigned long long)stats_.retranscodes,
                             stats_.submitWaitSeconds);
+        if (stats_.cpuUploads) {
+            const auto* w = stats_.cpuWhy;
+            __android_log_print(ANDROID_LOG_INFO, tag,
+                                "CPU uploads by reason: %llu ETC2/EAC, %llu no GPU kernel, %llu secondary command buffer, "
+                                "%llu reusable command buffer, %llu queue without compute, %llu too large, %llu kernel recording failed",
+                                (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3],
+                                (unsigned long long)w[4], (unsigned long long)w[5], (unsigned long long)w[6]);
+        }
     }
 
     std::mutex mutex_;
