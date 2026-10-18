@@ -329,6 +329,7 @@ export class Runtime {
       ...(compatibility.legacyOculusDriver ? { LegacyOculusDriver: true } : {}),
       ...(compatibility.questIdentity ? { QuestIdentity: true } : {}),
       ...(compatibility.controllersOnly ? { ControllersOnly: true } : {}),
+      ...(Number.isFinite(compatibility.renderScale) && compatibility.renderScale !== 1 ? { RenderScale: compatibility.renderScale } : {}),
       ...(sessionId ? { SessionId: sessionId } : {}),
       ...(precompose ? { PrecomposeProjectionLayers: true } : {}) })
       : powershellArgs(path.join(this.root, 'scripts/run/run_windows_game.ps1'), { Avd: this.settings.avd, Port: this.settings.port,

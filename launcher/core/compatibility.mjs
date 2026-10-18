@@ -7,7 +7,7 @@ const VERSION_KEYS = new Set(['versionCode', 'versionName']);
 const OVRPORT_KEYS = new Set(['recommended', 'extraPatches']);
 // legacyOculusDriver, questIdentity and controllersOnly serve unmodified Quest
 // APKs with older Oculus loaders in Direct mode (docs/iron_man_vr_compatibility.md).
-const RUNTIME_KEYS = new Set(['precomposeProjectionLayers', 'legacyOculusDriver', 'questIdentity', 'controllersOnly']);
+const RUNTIME_KEYS = new Set(['precomposeProjectionLayers', 'legacyOculusDriver', 'questIdentity', 'controllersOnly', 'renderScale']);
 // Patch names travel inside a semicolon-separated `--extra-patches` value where
 // `=` introduces per-patch arguments, so anything outside a plain identifier
 // would either split the value or inject arguments.
@@ -105,7 +105,12 @@ function checkProfile(profile, seenIds) {
     if (!Object.keys(profile.runtime).length) throw new Error(`${context} runtime needs at least one option.`);
     runtime = {};
     for (const [key, value] of Object.entries(profile.runtime)) {
-      if (typeof value !== 'boolean') throw new Error(`${context} runtime.${key} must be a boolean.`);
+      if (key === 'renderScale') {
+        // Multiplies the recommended eye size reported to the game (direct mode).
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0.5 || value > 2) {
+          throw new Error(`${context} runtime.renderScale must be a number from 0.5 to 2.`);
+        }
+      } else if (typeof value !== 'boolean') throw new Error(`${context} runtime.${key} must be a boolean.`);
       runtime[key] = value;
     }
     if (runtime.controllersOnly && !runtime.legacyOculusDriver) {
@@ -113,7 +118,8 @@ function checkProfile(profile, seenIds) {
     }
   }
 
-  if (!ovrport && !Object.values(runtime ?? {}).includes(true)) {
+  const acts = value => value === true || (typeof value === 'number' && value !== 1);
+  if (!ovrport && !Object.values(runtime ?? {}).some(acts)) {
     throw new Error(`${context} has no compatibility actions.`);
   }
 
@@ -201,5 +207,6 @@ export function compatibilityPatchArgs(resolution) {
 
 export function compatibilityRuntimeOptions(resolution) {
   if (!resolution || resolution.status !== 'matched' || !resolution.profile) return {};
-  return Object.fromEntries(Object.entries(resolution.profile.runtime ?? {}).filter(([, value]) => value === true));
+  return Object.fromEntries(Object.entries(resolution.profile.runtime ?? {})
+    .filter(([key, value]) => value === true || (key === 'renderScale' && value !== 1)));
 }

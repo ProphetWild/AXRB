@@ -179,6 +179,9 @@ test('malformed envelopes, identities and unknown keys are rejected', async t =>
     ['controllersOnly without the driver', doc(profile({ runtime: { controllersOnly: true } }))],
     ['legacy option not boolean', doc(profile({ runtime: { legacyOculusDriver: 1 } }))],
     ['inert runtime false alone', doc((() => { const p = profile(); delete p.ovrport; p.runtime = { precomposeProjectionLayers: false }; return p; })())],
+    ['render scale too large', doc(profile({ runtime: { renderScale: 3 } }))],
+    ['render scale not a number', doc(profile({ runtime: { renderScale: '1.2' } }))],
+    ['inert render scale alone', doc((() => { const p = profile(); delete p.ovrport; p.runtime = { renderScale: 1 }; return p; })())],
   ];
   for (const [name, body] of cases) {
     if (body === null) {
@@ -223,6 +226,9 @@ test('patch and runtime helpers act only on matched profiles', () => {
   assert.deepEqual(compatibilityRuntimeOptions(legacy), { legacyOculusDriver: true, questIdentity: true, controllersOnly: true });
   const disabled = { status: 'matched', profile: { runtime: { precomposeProjectionLayers: false } } };
   assert.deepEqual(compatibilityRuntimeOptions(disabled), {});
+  const scaled = { status: 'matched', profile: { runtime: { renderScale: 1.18 } } };
+  assert.deepEqual(compatibilityRuntimeOptions(scaled), { renderScale: 1.18 });
+  assert.deepEqual(compatibilityRuntimeOptions({ status: 'matched', profile: { runtime: { renderScale: 1 } } }), {});
   for (const resolution of [{ status: 'mismatch' }, { status: 'none' }, null, undefined, {}]) {
     assert.deepEqual(compatibilityPatchArgs(resolution), []);
     assert.deepEqual(compatibilityRuntimeOptions(resolution), {});

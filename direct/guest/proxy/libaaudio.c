@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -109,9 +110,14 @@ struct AAudioStreamStruct {
     int32_t callback_capacity;
 };
 
-// Host side (direct/src/audio.cpp).
+// Host side (direct/src/audio.cpp). min_frames: the buffer the host must hold
+// at least (a data callback's block, twice, or the requested capacity);
+// callback: whether the app is called back for samples.
 extern int64_t axrb_audio_open(int32_t sample_rate, int32_t channels, int32_t format, int32_t* out_rate,
-                               int32_t* out_burst, int32_t* out_capacity);
+                               int32_t* out_burst, int32_t* out_capacity, int32_t min_frames, int32_t callback);
+// Logs a line from the guest's audio libraries (refused requests and the like).
+extern void axrb_audio_note(const char* text);
+AXRB_HOST_FUNCTION(axrb_audio_note, "audio.note");
 extern int32_t axrb_audio_start(int64_t handle);
 extern int32_t axrb_audio_stop(int64_t handle);
 extern int32_t axrb_audio_flush(int64_t handle);
@@ -235,8 +241,14 @@ aaudio_result_t AAudioStreamBuilder_openStream(AAudioStreamBuilder* b, AAudioStr
     s->params.channel_count = channels_of(b);
     if (s->params.format == AAUDIO_FORMAT_UNSPECIFIED) s->params.format = AAUDIO_FORMAT_PCM_FLOAT;
     int32_t rate = 0, burst = 0, capacity = 0;
+    // A data callback is only called when a whole block fits, so the host buffer
+    // must hold two of them: with the default 40 ms buffer, a game asking for
+    // blocks larger than that was never called back and stayed silent.
+    int32_t min_frames = b->buffer_capacity > 0 ? b->buffer_capacity : 0;
+    if (b->data_callback && b->frames_per_callback > 0 && 2 * b->frames_per_callback > min_frames)
+        min_frames = 2 * b->frames_per_callback;
     int64_t h = axrb_audio_open(s->params.sample_rate, s->params.channel_count, s->params.format, &rate, &burst,
-                                &capacity);
+                                &capacity, min_frames, b->data_callback != NULL);
     if (h <= 0) {
         free(s);
         return h < 0 ? (aaudio_result_t)h : AAUDIO_ERROR_UNAVAILABLE;
@@ -268,6 +280,14 @@ static void set_state(AAudioStream* s, aaudio_stream_state_t state) {
 static void* callback_thread(void* arg) {
     AAudioStream* s = arg;
     int32_t frames = s->params.frames_per_callback > 0 ? s->params.frames_per_callback : s->burst;
+    if (frames > s->params.buffer_capacity) {
+        // Never fits: better smaller blocks than a callback that never runs.
+        char note[128];
+        snprintf(note, sizeof note, "AAudio callback blocks of %d frames exceed the %d-frame buffer; using %d", frames,
+                 s->params.buffer_capacity, s->params.buffer_capacity);
+        axrb_audio_note(note);
+        frames = s->params.buffer_capacity;
+    }
     if (s->callback_capacity < frames) {
         free(s->callback_buffer);
         s->callback_buffer = malloc((size_t)frames * s->frame_bytes);

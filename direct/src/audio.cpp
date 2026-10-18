@@ -18,7 +18,10 @@
 #include <ksmedia.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 
 namespace axrb {
@@ -37,8 +40,15 @@ struct Stream {
     int32_t frame_bytes = 0;
     int32_t rate = 0;
     int32_t burst = 0;
+    int32_t format = 0;
+    int32_t channels = 0;
     bool started = false;
     std::mutex lock;
+    // Level meter, logged every 10 s while started: frames written and peak.
+    int64_t handle = 0;
+    uint64_t metered_frames = 0;
+    float metered_peak = 0;
+    int64_t meter_start_ns = 0;
 };
 
 std::mutex g_streams_lock;
@@ -68,8 +78,8 @@ void destroy(Stream* s) {
     delete s;
 }
 
-int64_t open_stream(int32_t rate, int32_t channels, int32_t format, int32_t* out_rate, int32_t* out_burst,
-                    int32_t* out_capacity) {
+int64_t open_stream(int32_t rate, int32_t channels, int32_t format, int32_t min_frames, bool callback,
+                    int32_t* out_rate, int32_t* out_burst, int32_t* out_capacity) {
     ensure_com();
     IMMDeviceEnumerator* enumerator = nullptr;
     if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
@@ -115,7 +125,11 @@ int64_t open_stream(int32_t rate, int32_t channels, int32_t format, int32_t* out
                                   KSAUDIO_SPEAKER_5POINT1 | SPEAKER_BACK_CENTER, KSAUDIO_SPEAKER_7POINT1_SURROUND};
     fmt.dwChannelMask = masks[channels];
 
-    const REFERENCE_TIME duration = 400000;  // 40 ms
+    // 40 ms, or more when the guest needs it: a data callback is only called
+    // when its whole block fits, so a smaller buffer means silence.
+    REFERENCE_TIME duration = 400000;
+    if (min_frames > 0)
+        duration = std::max<REFERENCE_TIME>(duration, static_cast<REFERENCE_TIME>(min_frames) * 10000000 / rate + 1);
     hr = s->client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                                    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
@@ -133,6 +147,8 @@ int64_t open_stream(int32_t rate, int32_t channels, int32_t format, int32_t* out
     REFERENCE_TIME period = 0;
     s->client->GetDevicePeriod(&period, nullptr);
     s->rate = rate;
+    s->format = format;
+    s->channels = channels;
     s->frame_bytes = fmt.Format.nBlockAlign;
     s->burst = std::max<int32_t>(64, static_cast<int32_t>(period * rate / 10000000));
     if (!s->render) {
@@ -144,10 +160,44 @@ int64_t open_stream(int32_t rate, int32_t channels, int32_t format, int32_t* out
     *out_capacity = static_cast<int32_t>(s->capacity);
     std::lock_guard<std::mutex> held(g_streams_lock);
     int64_t handle = g_next_handle++;
+    s->handle = handle;
     g_streams[handle] = s;
-    LOGI("audio", "output stream %lld: %d Hz, %d channels, format %d, burst %d, capacity %u", (long long)handle, rate,
-         channels, format, s->burst, s->capacity);
+    LOGI("audio", "output stream %lld: %d Hz, %d channels, format %d, burst %d, capacity %u, %s%s", (long long)handle, rate,
+         channels, format, s->burst, s->capacity, callback ? "data callback" : "blocking writes",
+         min_frames > 0 ? (" (needs " + std::to_string(min_frames) + " frames)").c_str() : "");
     return handle;
+}
+
+// Peak of float (format 2) or 16-bit (format 1) samples; other formats count frames only.
+float peak_of(const BYTE* data, size_t samples, int32_t format) {
+    float peak = 0;
+    if (format == 2) {
+        const auto* f = reinterpret_cast<const float*>(data);
+        for (size_t i = 0; i < samples; ++i) peak = std::max(peak, std::fabs(f[i]));
+    } else if (format == 1) {
+        const auto* p = reinterpret_cast<const int16_t*>(data);
+        for (size_t i = 0; i < samples; ++i) peak = std::max(peak, std::abs(static_cast<int>(p[i])) / 32768.0f);
+    }
+    return peak;
+}
+
+// Logs a started stream's writes over the last 10 s: how much of real time the
+// guest supplied and how loud it was, so "no data" and "silence" differ.
+// Caller holds s->lock.
+void meter(Stream* s, uint64_t frames, float peak) {
+    const int64_t now = monotonic_ns();
+    if (!s->meter_start_ns) s->meter_start_ns = now;
+    s->metered_frames += frames;
+    s->metered_peak = std::max(s->metered_peak, peak);
+    const int64_t elapsed = now - s->meter_start_ns;
+    if (elapsed < 10'000'000'000LL) return;
+    const double seconds = elapsed / 1e9;
+    LOGI("audio", "stream %lld: %.0f%% of real time written over %.0f s, peak %.3f%s", (long long)s->handle,
+         100.0 * s->metered_frames / (seconds * s->rate), seconds, s->metered_peak,
+         s->metered_frames && s->metered_peak == 0 && (s->format == 1 || s->format == 2) ? " (silence)" : "");
+    s->metered_frames = 0;
+    s->metered_peak = 0;
+    s->meter_start_ns = now;
 }
 
 int32_t room(Stream* s) {
@@ -171,7 +221,8 @@ void audio_init() {
     register_named_function("audio.open", [](HostCall& c) {
         int32_t rate = 0, burst = 0, capacity = 0;
         int64_t h = open_stream(static_cast<int32_t>(c.x(0)), static_cast<int32_t>(c.x(1)),
-                                static_cast<int32_t>(c.x(2)), &rate, &burst, &capacity);
+                                static_cast<int32_t>(c.x(2)), static_cast<int32_t>(c.x(6)), c.x(7) != 0, &rate, &burst,
+                                &capacity);
         if (h > 0) {
             guest_write(c.x(3), &rate, 4);
             guest_write(c.x(4), &burst, 4);
@@ -214,6 +265,10 @@ void audio_init() {
         ensure_com();
         const int64_t timeout_ns = static_cast<int64_t>(c.x(1));
         int32_t r = room(s);
+        if (s->started) {  // reports windows in which nothing was written, too
+            std::lock_guard<std::mutex> held(s->lock);
+            meter(s, 0, 0);
+        }
         if (r < 0 || r >= s->burst || !s->started || timeout_ns <= 0) return c.ret(static_cast<uint64_t>(static_cast<int64_t>(r)));
         DWORD ms = static_cast<DWORD>(std::min<int64_t>((timeout_ns + 999999) / 1000000, 1000));
         WaitForSingleObject(s->event, ms);
@@ -229,8 +284,18 @@ void audio_init() {
         if (FAILED(s->render->GetBuffer(static_cast<UINT32>(frames), &buffer)))
             return c.ret(static_cast<uint64_t>(static_cast<int64_t>(kErrorDisconnected)));
         guest_read(c.x(1), buffer, static_cast<size_t>(frames) * s->frame_bytes);
+        const float peak = peak_of(buffer, static_cast<size_t>(frames) * s->channels, s->format);
         s->render->ReleaseBuffer(static_cast<UINT32>(frames), 0);
+        {
+            std::lock_guard<std::mutex> held(s->lock);
+            meter(s, static_cast<uint64_t>(frames), peak);
+        }
         c.ret(static_cast<uint64_t>(frames));
+    });
+    register_named_function("audio.note", [](HostCall& c) {
+        std::string text;
+        if (guest_string(c.x(0), text, 256)) LOGI("audio", "guest: %s", text.c_str());
+        c.ret(0);
     });
     register_named_function("audio.position", [](HostCall& c) {
         Stream* s = stream_of(static_cast<int64_t>(c.x(0)));

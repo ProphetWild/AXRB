@@ -98,7 +98,8 @@ LEGACY_DRIVER_ROOT = '/data/app/com.oculus.systemdriver-axrb'
 
 def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
             runtime=None, assets=None, check_jni=False, diagnostics=False,
-            legacy_oculus_driver=None, quest_identity=False, controllers_only=False, textures='rgba8'):
+            legacy_oculus_driver=None, quest_identity=False, controllers_only=False, textures='rgba8',
+            render_scale=1.0):
     apk, bootstrap = required(apk), required(bootstrap)
     sysroot, data = Path(sysroot).resolve(), Path(data).resolve()
     native, proxies = Path(native), Path(proxies)
@@ -175,6 +176,12 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
         args.extend(['--prop', 'debug.axrb.astc_gpu=0'])
     elif textures != 'gpu':
         raise ValueError(f'Unknown texture mode: {textures}')
+    # Scales the recommended eye size the runtime reports (a game that renders
+    # below it, like AC Nexus at a fixed 85%, then lands on native resolution).
+    if not 0.5 <= render_scale <= 2.0:
+        raise ValueError(f'Render scale out of range: {render_scale}')
+    if render_scale != 1.0:
+        args.extend(['--prop', f'debug.axrb.render_scale={render_scale:.3f}'])
     for env in ('LD_LIBRARY_PATH=/apex/com.android.art/lib64:/apex/com.android.os.statsd/lib64:/apex/com.android.runtime/lib64/bionic:/system/lib64',
                 'BOOTCLASSPATH=' + boot, 'CLASSPATH=/system/framework/axrb-bootstrap.dex'):
         args.extend(['--env', env])
@@ -200,6 +207,7 @@ def main():
     parser.add_argument('--controllers-only', action='store_true')
     parser.add_argument('--diagnostics', action='store_true')
     parser.add_argument('--textures', choices=('rgba8', 'gpu', 'bc7'), default='rgba8')
+    parser.add_argument('--render-scale', type=float, default=1.0)
     print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=True))
 
 

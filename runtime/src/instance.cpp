@@ -1,5 +1,7 @@
 #include "runtime_internal.h"
 
+#include <cstdlib>
+
 // The graphics handshake is where engines give up without saying why, and
 // log_call is compiled out of release builds, so these few steps report
 // themselves unconditionally.
@@ -498,16 +500,32 @@ XrResult XRAPI_CALL xrEnumerateViewConfigurationViews_impl(
 
     *viewCountOutput = 2;
     query_render_extent();
+    // debug.axrb.render_scale (per-game compatibility): a game that renders
+    // below the recommended size (AC Nexus: a fixed 85%) is offered a larger
+    // one so it lands on the headset's resolution. Exported frames are still
+    // capped at the host's size; anything larger is scaled down to it.
+    static const float renderScale = [] {
+#if defined(__ANDROID__)
+        char value[PROP_VALUE_MAX]{};
+        __system_property_get("debug.axrb.render_scale", value);
+        const float scale = static_cast<float>(std::atof(value));
+        return scale >= 0.5f && scale <= 2.0f ? scale : 1.0f;
+#else
+        return 1.0f;
+#endif
+    }();
+    const uint32_t width = static_cast<uint32_t>(g_renderWidth * renderScale + 0.5f);
+    const uint32_t height = static_cast<uint32_t>(g_renderHeight * renderScale + 0.5f);
     if (viewCapacityInput > 0 && views != nullptr) {
         const uint32_t count = viewCapacityInput < 2 ? viewCapacityInput : 2;
         for (uint32_t i = 0; i < count; ++i) {
             if (views[i].type != XR_TYPE_VIEW_CONFIGURATION_VIEW) {
                 return XR_ERROR_VALIDATION_FAILURE;
             }
-            views[i].recommendedImageRectWidth = g_renderWidth;
-            views[i].maxImageRectWidth = g_renderWidth;
-            views[i].recommendedImageRectHeight = g_renderHeight;
-            views[i].maxImageRectHeight = g_renderHeight;
+            views[i].recommendedImageRectWidth = width;
+            views[i].maxImageRectWidth = width;
+            views[i].recommendedImageRectHeight = height;
+            views[i].maxImageRectHeight = height;
             views[i].recommendedSwapchainSampleCount = 1;
             views[i].maxSwapchainSampleCount = 1;
             const auto& sourceFov = g_viewFovsValid

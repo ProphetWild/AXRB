@@ -1,8 +1,11 @@
 #include <aaudio/AAudio.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../axrb_guest.h"
 
 typedef struct OutputObject OutputObject;
 typedef struct {
@@ -33,7 +36,33 @@ static OutputObject *owner(const void *self) {
 static int iid_equal(SLInterfaceID a, SLInterfaceID b) {
   return a && b && !memcmp(a, b, sizeof(*a));
 }
-static SLresult unsupported(void) { return SL_RESULT_FEATURE_UNSUPPORTED; }
+// Refused requests are logged (direct.log "audio: guest: ..."): an audio
+// engine that cannot get what it asks for usually stays silent without a word.
+void axrb_opensles_note(const char *text);
+AXRB_HOST_FUNCTION(axrb_opensles_note, "audio.note");
+static void note(const char *format, ...) {
+  static int notes;
+  if (notes++ >= 40)
+    return;
+  char text[200];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(text, sizeof text, format, args);
+  va_end(args);
+  axrb_opensles_note(text);
+}
+static void note_iid(const char *what, SLuint32 kind, SLInterfaceID iid) {
+  if (!iid) {
+    note("OpenSL ES: %s: null interface id (object kind %u)", what, (unsigned)kind);
+    return;
+  }
+  note("OpenSL ES: %s: interface %08x-%04x-%04x-%04x refused (object kind %u)", what, (unsigned)iid->time_low,
+       (unsigned)iid->time_mid, (unsigned)iid->time_hi_and_version, (unsigned)iid->clock_seq, (unsigned)kind);
+}
+static SLresult unsupported(void) {
+  note("OpenSL ES: an unsupported method was called");
+  return SL_RESULT_FEATURE_UNSUPPORTED;
+}
 static SLresult object_interface(SLObjectItf self, const SLInterfaceID iid,
                                  void *result) {
   if (!result)
@@ -56,6 +85,8 @@ static SLresult object_interface(SLObjectItf self, const SLInterfaceID iid,
       itf = &o->config;
   }
   *(void **)result = itf;
+  if (!itf)
+    note_iid("GetInterface", o->kind, iid);
   return itf ? SL_RESULT_SUCCESS : SL_RESULT_FEATURE_UNSUPPORTED;
 }
 static aaudio_data_callback_result_t output_callback(AAudioStream *stream,
@@ -124,8 +155,10 @@ static aaudio_data_callback_result_t output_callback(AAudioStream *stream,
 }
 static SLresult object_realize(SLObjectItf self, SLboolean async) {
   OutputObject *o = owner(self);
-  if (async)
+  if (async) {
+    note("OpenSL ES: asynchronous Realize refused (object kind %u)", (unsigned)o->kind);
     return SL_RESULT_FEATURE_UNSUPPORTED;
+  }
   if (o->state == SL_OBJECT_STATE_REALIZED)
     return SL_RESULT_PRECONDITIONS_VIOLATED;
   if (o->kind == SL_OBJECTID_AUDIOPLAYER) {
@@ -303,8 +336,10 @@ static SLresult config_set(SLAndroidConfigurationItf self, const SLchar *key,
                            const void *value, SLuint32 size) {
   OutputObject *o = owner(self);
   SLuint32 *slot = configuration(o, key);
-  if (!slot)
+  if (!slot) {
+    note("OpenSL ES: configuration key '%s' refused", key ? (const char *)key : "(null)");
     return SL_RESULT_FEATURE_UNSUPPORTED;
+  }
   if (!value || size != 4)
     return 2;
   if (o->state != SL_OBJECT_STATE_UNREALIZED)

@@ -16,6 +16,8 @@ param(
     [switch]$FastFp,
     # Guest CPU count (AXRB_DIRECT_CPUS); 0 keeps the runner's own choice, up to 8.
     [ValidateRange(0, 64)][int]$GuestCpus = 0,
+    # Multiplies the recommended eye size reported to the game (per-game compatibility).
+    [ValidateRange(0.5, 2.0)][double]$RenderScale = 1.0,
     [switch]$PrecomposeProjectionLayers,
     # Per-game compatibility for unmodified Quest APKs with older Oculus loaders.
     [switch]$LegacyOculusDriver,
@@ -52,7 +54,8 @@ $prepare = @((Join-Path $AxrbRoot 'direct/tools/prepare_art_session.py'),
     '--apk', $Apk, '--activity', $Activity, '--sysroot', $Sysroot, '--data', $DataDirectory,
     '--bootstrap', (Join-Path $directDirectory 'art/axrb-bootstrap.dex'),
     '--native', (Join-Path $directDirectory 'art/lib64'),
-    '--proxies', (Join-Path $directDirectory 'guest/lib64'), '--textures', $TextureMode)
+    '--proxies', (Join-Path $directDirectory 'guest/lib64'), '--textures', $TextureMode,
+    '--render-scale', $RenderScale.ToString([Globalization.CultureInfo]::InvariantCulture))
 if ($AssetList) { $prepare += @('--assets', $AssetList) }
 if ($LegacyOculusDriver) { $prepare += @('--legacy-oculus-driver', (Join-Path $directDirectory 'guest/axrb-systemdriver.apk')) }
 if ($QuestIdentity) { $prepare += '--quest-identity' }
@@ -182,6 +185,7 @@ try {
         settings = [ordered]@{
             translator = $Translator; textureMode = $TextureMode; fastFp = [bool]$FastFp
             guestCpus = $(if ($GuestCpus -gt 0) { $GuestCpus } else { 'auto' })
+            renderScale = $RenderScale
             preciseImageWait = $(if ($env:AXRB_PRECISE_IMAGE_WAIT) { $env:AXRB_PRECISE_IMAGE_WAIT } else { '1' })
             precomposeProjectionLayers = [bool]$PrecomposeProjectionLayers
             legacyOculusDriver = [bool]$LegacyOculusDriver; questIdentity = [bool]$QuestIdentity; controllersOnly = [bool]$ControllersOnly
