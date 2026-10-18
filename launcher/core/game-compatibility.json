@@ -31,8 +31,8 @@
       "label": "Assassin's Creed Nexus VR 207706",
       "package": "com.Ubisoft.ACNexusVR",
       "versions": [{ "versionCode": "207706" }],
-      "runtime": { "renderScale": 1.18 },
-      "summary": "The game renders gameplay at a fixed 85% of the recommended eye size (its Quest 2 profile; OVRPort's shim reports a Quest 2). Direct mode reports an 18% larger size so gameplay lands at the headset's native resolution; menus render above it and are scaled down."
+      "runtime": { "renderScale": 1.35 },
+      "summary": "The game renders gameplay at a fixed 85% of the recommended eye size (its Quest 2 profile, which OVRPort pins; reporting a Quest 3 through Android crashes it at start). Direct mode reports a 35% larger size, so gameplay renders about 15% above the headset's resolution and is scaled down, which looks sharper than 1.18 (native) did; it held 90 fps at 1.18."
     },
     {
       "id": "iron-man-vr-0.2.1",
