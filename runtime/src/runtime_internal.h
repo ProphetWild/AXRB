@@ -7,6 +7,7 @@
 #include "pose_client.h"
 #include "perf_stats.h"
 #include "vulkan_backend.h"
+#include "gles_angle.h"
 #include "android_surface.h"
 #include <memory>
 #include "controller_input.h"
@@ -114,6 +115,8 @@ struct SwapchainRecord {
 #if defined(__ANDROID__)
     VulkanSwapchain vulkan{};
     std::shared_ptr<AndroidSurface> surface;
+    // OpenGL ES through ANGLE: each image's Vulkan view (gles_angle.h).
+    std::array<GlesTransfer, 3> transfers{};
 #endif
     bool created = false;
     bool acquired = false;
@@ -144,6 +147,7 @@ extern axrb::protocol::PoseFrame g_lastViewPoseFrame;
 XrResult XRAPI_CALL xrCreateSwapchainAndroidSurfaceKHR_impl(XrSession session, const XrSwapchainCreateInfo* info, XrSwapchain* swapchain, jobject* surface);
 XrResult XRAPI_CALL xrGetVulkanDeviceExtensionsKHR_impl(XrInstance instance, XrSystemId systemId, uint32_t capacity, uint32_t* count, char* buffer);
 extern VulkanBackend g_vulkan;
+extern GlesAngle g_gles;
 extern bool g_vulkanRequirementsQueried;
 extern VkInstance g_vulkanInstance;
 #endif

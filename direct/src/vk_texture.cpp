@@ -125,6 +125,14 @@ constexpr VkFormatFeatureFlags kLinearFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE
     VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
 constexpr VkImageUsageFlags kLinearUsage = VK_IMAGE_USAGE_SAMPLED_BIT |
     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+// Optimal compressed images support what the substitution does (sampling and
+// transfers, as on a mobile GPU), not everything the backing format can do:
+// an engine that sees a color-attachment ASTC format (ANGLE does) asks for
+// that usage, and the substitution refuses the image.
+constexpr VkFormatFeatureFlags kCompressedFeatures = kLinearFeatures | VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT;
+constexpr VkImageCreateFlags kReinterpretingFlags = VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT |
+    VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | VK_IMAGE_CREATE_ALIAS_BIT | VK_IMAGE_CREATE_SPARSE_BINDING_BIT;
 
 uint64_t GetPhysicalDeviceFeatures(const uint64_t* a) {
     auto pd = a_<VkPhysicalDevice>(a[0]);
@@ -157,6 +165,7 @@ uint64_t GetPhysicalDeviceFormatProperties(const uint64_t* a) {
         pd, format, a_<VkFormatProperties*>(a[2]));
     if (substituted) {
         auto* out = a_<VkFormatProperties*>(a[2]);
+        out->optimalTilingFeatures &= kCompressedFeatures;
         out->linearTilingFeatures = out->optimalTilingFeatures & kLinearFeatures;
         out->bufferFeatures = 0;
     }
@@ -174,11 +183,13 @@ uint64_t format_properties2(const uint64_t* a, const char* name) {
     next(pd, format, a_<VkFormatProperties2*>(a[2]));
     if (substituted) {
         auto* out = a_<VkFormatProperties2*>(a[2]);
+        out->formatProperties.optimalTilingFeatures &= kCompressedFeatures;
         out->formatProperties.linearTilingFeatures = out->formatProperties.optimalTilingFeatures & kLinearFeatures;
         out->formatProperties.bufferFeatures = 0;
         for (auto* chain = static_cast<VkBaseOutStructure*>(out->pNext); chain; chain = chain->pNext)
             if (chain->sType == VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3) {
                 auto* props = reinterpret_cast<VkFormatProperties3*>(chain);
+                props->optimalTilingFeatures &= kCompressedFeatures;
                 props->linearTilingFeatures = props->optimalTilingFeatures & kLinearFeatures;
                 props->bufferFeatures = 0;
             }
@@ -204,7 +215,9 @@ uint64_t GetPhysicalDeviceImageFormatProperties(const uint64_t* a) {
             if (a[2] != VK_IMAGE_TYPE_2D || (usage & ~kLinearUsage)) return r_(VK_ERROR_FORMAT_NOT_SUPPORTED);
             tiling = VK_IMAGE_TILING_OPTIMAL;
             usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        } else if (tiling != VK_IMAGE_TILING_OPTIMAL) return r_(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        } else if (tiling != VK_IMAGE_TILING_OPTIMAL || (usage & ~kLinearUsage) || (a[5] & kReinterpretingFlags)) {
+            return r_(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        }
         format = target;
     }
     return r_(global<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties")(
@@ -223,8 +236,14 @@ uint64_t image_format_properties2(const uint64_t* a, const char* name) {
             if (info.type != VK_IMAGE_TYPE_2D || (info.usage & ~kLinearUsage)) return r_(VK_ERROR_FORMAT_NOT_SUPPORTED);
             info.tiling = VK_IMAGE_TILING_OPTIMAL;
             info.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        } else if (info.tiling != VK_IMAGE_TILING_OPTIMAL) return r_(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        } else if (info.tiling != VK_IMAGE_TILING_OPTIMAL || (info.usage & ~kLinearUsage) || (info.flags & kReinterpretingFlags)) {
+            return r_(VK_ERROR_FORMAT_NOT_SUPPORTED);
+        }
         info.format = target;
+        // A view-format list names mobile formats the desktop driver rejects;
+        // it is only a hint, so a leading one is dropped from the query.
+        const auto* first = static_cast<const VkBaseInStructure*>(info.pNext);
+        if (first && first->sType == VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) info.pNext = first->pNext;
     }
     auto next = global<PFN_vkGetPhysicalDeviceImageFormatProperties2>(name);
     if (!next) next = global<PFN_vkGetPhysicalDeviceImageFormatProperties2>("vkGetPhysicalDeviceImageFormatProperties2");

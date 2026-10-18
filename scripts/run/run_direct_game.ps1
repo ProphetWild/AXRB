@@ -23,6 +23,10 @@ param(
     [switch]$LegacyOculusDriver,
     [switch]$QuestIdentity,
     [switch]$ControllersOnly,
+    # OpenGL ES driver: ANGLE (on the forwarded Vulkan driver), the stub with no
+    # display, or auto: ANGLE for Unreal games built without Vulkan.
+    # AXRB_DIRECT_GLES overrides auto.
+    [ValidateSet('auto', 'angle', 'stub')][string]$Gles = 'auto',
     [ValidatePattern('^Local\\AXRB\.FpsHud\.[a-f0-9]{32}$')][string]$FpsHudEventName,
     [ValidatePattern('^[a-f0-9]{8}$')][string]$SessionId
 )
@@ -60,9 +64,12 @@ if ($AssetList) { $prepare += @('--assets', $AssetList) }
 if ($LegacyOculusDriver) { $prepare += @('--legacy-oculus-driver', (Join-Path $directDirectory 'guest/axrb-systemdriver.apk')) }
 if ($QuestIdentity) { $prepare += '--quest-identity' }
 if ($ControllersOnly) { $prepare += '--controllers-only' }
+if ($Gles -eq 'auto' -and $env:AXRB_DIRECT_GLES -in @('angle', 'stub')) { $Gles = $env:AXRB_DIRECT_GLES }
+$prepare += @('--gles', $Gles)
 $prepared = & $python @prepare
 if ($LASTEXITCODE -ne 0) { throw 'Preparing the AOSP application failed. See the error above.' }
 $arguments = $prepared | ConvertFrom-Json
+$glesDriver = if ($arguments -contains 'ro.hardware.egl=angle') { 'angle' } else { 'stub' }
 
 function Quote([string]$Value) {
     # One Windows command-line argument, including embedded quotes and trailing backslashes.
@@ -186,6 +193,7 @@ try {
             translator = $Translator; textureMode = $TextureMode; fastFp = [bool]$FastFp
             guestCpus = $(if ($GuestCpus -gt 0) { $GuestCpus } else { 'auto' })
             renderScale = $RenderScale
+            gles = $glesDriver
             preciseImageWait = $(if ($env:AXRB_PRECISE_IMAGE_WAIT) { $env:AXRB_PRECISE_IMAGE_WAIT } else { '1' })
             precomposeProjectionLayers = [bool]$PrecomposeProjectionLayers
             legacyOculusDriver = [bool]$LegacyOculusDriver; questIdentity = [bool]$QuestIdentity; controllersOnly = [bool]$ControllersOnly

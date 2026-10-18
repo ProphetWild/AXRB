@@ -71,7 +71,7 @@ uint32_t VulkanBackend::memory_type(uint32_t bits, VkMemoryPropertyFlags flags) 
         if ((bits & (1u << i)) && (props.memoryTypes[i].propertyFlags & flags) == flags) return i;
     return UINT32_MAX;
 }
-bool VulkanBackend::initialize(const XrGraphicsBindingVulkanKHR& binding) {
+bool VulkanBackend::initialize(const XrGraphicsBindingVulkanKHR& binding, VkQueue queue, const VulkanQueueLock& lock) {
     if (active() || !binding.instance || !binding.device || !binding.physicalDevice ||
         binding.physicalDevice != choose_device(binding.instance)) return false;
     uint32_t count = 0;
@@ -82,7 +82,9 @@ bool VulkanBackend::initialize(const XrGraphicsBindingVulkanKHR& binding) {
         !(families[binding.queueFamilyIndex].queueFlags & VK_QUEUE_GRAPHICS_BIT)) return false;
     queueFamily_ = binding.queueFamilyIndex;
     device_ = binding.device; physical_ = binding.physicalDevice;
-    vkGetDeviceQueue(device_, binding.queueFamilyIndex, binding.queueIndex, &queue_);
+    queueLock_ = lock;
+    if (queue) queue_ = queue;
+    else vkGetDeviceQueue(device_, binding.queueFamilyIndex, binding.queueIndex, &queue_);
     VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pool.queueFamilyIndex = binding.queueFamilyIndex;
@@ -133,7 +135,7 @@ bool VulkanBackend::ensure_buffer(VkDeviceSize bytes) {
 void VulkanBackend::shutdown() {
     drain_publication();
     if (!device_) return;
-    vkQueueWaitIdle(queue_);
+    wait_queue_idle();
     if (mapped_) vkUnmapMemory(device_, bufferMemory_);
     if (buffer_) vkDestroyBuffer(device_, buffer_, nullptr);
     if (bufferMemory_) vkFreeMemory(device_, bufferMemory_, nullptr);
@@ -177,12 +179,34 @@ bool VulkanBackend::finish(bool defer) {
     if (!ok(vkEndCommandBuffer(cmd_), "end commands") || !ok(vkResetFences(device_, 1, &fence_), "reset fence")) return false;
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO}; submit.commandBufferCount = 1; submit.pCommandBuffers = &cmd_;
     const auto prepared = trace ? VulkanFinishTrace::Clock::now() : VulkanFinishTrace::Clock::time_point{};
-    if (!ok(vkQueueSubmit(queue_, 1, &submit, fence_), "submit")) return false;
+    if (queueLock_.lock) queueLock_.lock(queueLock_.owner);
+    const VkResult submitResult = vkQueueSubmit(queue_, 1, &submit, fence_);
+    if (queueLock_.unlock) queueLock_.unlock(queueLock_.owner);
+    if (!ok(submitResult, "submit")) return false;
     const auto submitted = trace ? VulkanFinishTrace::Clock::now() : VulkanFinishTrace::Clock::time_point{};
     if (defer) return true;
     const bool completed = wait_copy();
     if (trace) trace->record(entered, prepared, submitted, VulkanFinishTrace::Clock::now());
     return completed;
+}
+VkResult VulkanBackend::wait_queue_idle() {
+    if (queueLock_.lock) queueLock_.lock(queueLock_.owner);
+    const VkResult result = vkQueueWaitIdle(queue_);
+    if (queueLock_.unlock) queueLock_.unlock(queueLock_.owner);
+    return result;
+}
+VkImageBlit VulkanBackend::eye_blit(const VulkanSwapchain& sc, const XrSwapchainSubImage& sub, bool flip,
+                                    uint32_t width, uint32_t height) const {
+    VkImageBlit blit{};
+    const int32_t band = static_cast<int32_t>(sc.bandHeight * sub.imageArrayIndex);
+    blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, sc.bandHeight ? 0u : sub.imageArrayIndex, 1};
+    blit.srcOffsets[0] = {sub.imageRect.offset.x, sub.imageRect.offset.y + band, 0};
+    blit.srcOffsets[1] = {sub.imageRect.offset.x + sub.imageRect.extent.width,
+                          sub.imageRect.offset.y + band + sub.imageRect.extent.height, 1};
+    if (flip != sc.glOrigin) std::swap(blit.srcOffsets[0].y, blit.srcOffsets[1].y);
+    blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    blit.dstOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+    return blit;
 }
 bool VulkanBackend::wait_copy() {
     return ok(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "wait fence");
@@ -250,13 +274,13 @@ XrResult VulkanBackend::create(VulkanSwapchain& sc, const XrSwapchainCreateInfo&
 void VulkanBackend::destroy(VulkanSwapchain& sc) {
     drain_publication();
     if (device_) {
-        vkQueueWaitIdle(queue_);
+        wait_queue_idle();
         if (sc.surfaceImage) vkDestroyImage(device_, sc.surfaceImage, nullptr);
         if (sc.surfaceMemory) vkFreeMemory(device_, sc.surfaceMemory, nullptr);
         if (sc.surfaceMapped) vkUnmapMemory(device_, sc.surfaceBufferMemory);
         if (sc.surfaceBuffer) vkDestroyBuffer(device_, sc.surfaceBuffer, nullptr);
         if (sc.surfaceBufferMemory) vkFreeMemory(device_, sc.surfaceBufferMemory, nullptr);
-        for (auto image : sc.images) if (image) vkDestroyImage(device_, image, nullptr);
+        if (!sc.borrowed) for (auto image : sc.images) if (image) vkDestroyImage(device_, image, nullptr);
         for (auto memory : sc.memory) if (memory) vkFreeMemory(device_, memory, nullptr);
     }
     sc = {};
@@ -318,18 +342,13 @@ bool VulkanBackend::export_batch(const std::vector<VulkanExportRequest>& request
         for (uint32_t eye = 0; eye < (request.mono() ? 1u : 2u); ++eye) {
             const auto& sc = *request.swapchains[eye]; const auto& sub = request.subimages[eye];
             auto& scaled = scaled_[formats[eye] == VK_FORMAT_R8G8B8A8_SRGB ? 1 : 0][eye];
-            const auto image = sc.images[request.indices[eye]];
-            barrier(image, sc.layers, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            const auto index = request.indices[eye];
+            const auto image = sc.images[index];
+            barrier(image, sc.layers, sc.layouts[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
             barrier(scaled.image, 1, scaled.initialized ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, scaled.initialized ? VK_ACCESS_TRANSFER_READ_BIT : 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-            VkImageBlit blit{};
-            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, sub.imageArrayIndex, 1};
-            blit.srcOffsets[0] = {sub.imageRect.offset.x, sub.imageRect.offset.y, 0};
-            blit.srcOffsets[1] = {sub.imageRect.offset.x + sub.imageRect.extent.width, sub.imageRect.offset.y + sub.imageRect.extent.height, 1};
-            if (request.verticalFlip[eye]) std::swap(blit.srcOffsets[0].y, blit.srcOffsets[1].y);
-            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-            blit.dstOffsets[1] = {static_cast<int32_t>(request.width), static_cast<int32_t>(request.height), 1};
+            const VkImageBlit blit = eye_blit(sc, sub, request.verticalFlip[eye], request.width, request.height);
             vkCmdBlitImage(cmd_, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scaled.image,
                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
             barrier(scaled.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -337,6 +356,7 @@ bool VulkanBackend::export_batch(const std::vector<VulkanExportRequest>& request
             scaled.initialized = true;
             barrier(image, sc.layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+            sc.layouts[index] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
     }
     VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -422,15 +442,11 @@ bool VulkanBackend::readback(const VulkanSwapchain* const swapchains[2], const u
         const auto& sc = *swapchains[eye]; const auto& sub = *subimages[eye];
         const auto index = indices[eye]; auto& scaled = *scratch[eye];
         const uint32_t w = width, h = height;
-        barrier(sc.images[index], sc.layers, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        barrier(sc.images[index], sc.layers, sc.layouts[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         barrier(scaled.image, 1, scaled.initialized ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, scaled.initialized ? VK_ACCESS_TRANSFER_READ_BIT : 0, VK_ACCESS_TRANSFER_WRITE_BIT);
-        VkImageBlit blit{}; blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, sub.imageArrayIndex, 1};
-        blit.srcOffsets[0] = {sub.imageRect.offset.x, sub.imageRect.offset.y, 0};
-        blit.srcOffsets[1] = {sub.imageRect.offset.x + sub.imageRect.extent.width, sub.imageRect.offset.y + sub.imageRect.extent.height, 1};
-        if (verticalFlip && verticalFlip[eye]) std::swap(blit.srcOffsets[0].y, blit.srcOffsets[1].y);
-        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; blit.dstOffsets[1] = {static_cast<int32_t>(w), static_cast<int32_t>(h), 1};
+        const VkImageBlit blit = eye_blit(sc, sub, verticalFlip && verticalFlip[eye], w, h);
         vkCmdBlitImage(cmd_, sc.images[index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, scaled.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
         barrier(scaled.image, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         VkBufferImageCopy copy{}; copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}; copy.imageExtent = {w, h, 1};
@@ -438,6 +454,7 @@ bool VulkanBackend::readback(const VulkanSwapchain* const swapchains[2], const u
         if (!gpuExportEnabled_) vkCmdCopyImageToBuffer(cmd_, scaled.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer_, 1, &copy);
         barrier(sc.images[index], sc.layers, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+        sc.layouts[index] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
     VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
     host.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;

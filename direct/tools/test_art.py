@@ -115,6 +115,15 @@ def main():
                 run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data',
                      '--prop', 'debug.axrb.astc_rgba8=1', *mounts, binary, 'khr', 'upload'],
                     log=work / (name + '-rgba8-selftest.log'), marker='VULKAN_ASTC_UPLOAD_PASS', timeout=30)
+        # OpenGL ES through the AOSP image's ANGLE on the forwarded Vulkan driver,
+        # and the Vulkan interop the OpenXR runtime exports GLES frames with.
+        binary = work / 'gles-selftest'
+        run(flags + [source / 'gles_selftest.c', '-lEGL', '-lGLESv3', '-lvulkan', '-o', binary])
+        run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data', '--prop', 'ro.hardware.egl=angle',
+             '--mount-ro', '/system/lib64/libvulkan.so=' + str(bridges / 'guest/lib64/libvulkan.so'),
+             '--mount-ro', '/system/lib64/libEGL_angle.so=' + str(bridges / 'guest/lib64/libEGL_angle.so'),
+             '--mount-ro', '/system/lib64/libEGL_angle_real.so=' + str(root / 'system/lib64/libEGL_angle.so'), binary],
+            log=work / 'gles-selftest.log', marker='GLES_SELFTEST_PASS', timeout=60)
 
 
 if __name__ == '__main__':

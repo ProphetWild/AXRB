@@ -28,6 +28,7 @@ bool g_viewFovsValid = false;
 axrb::protocol::PoseFrame g_lastViewPoseFrame{};
 #if defined(__ANDROID__)
 VulkanBackend g_vulkan;
+GlesAngle g_gles;
 bool g_vulkanRequirementsQueried = false;
 VkInstance g_vulkanInstance = VK_NULL_HANDLE;
 #endif
