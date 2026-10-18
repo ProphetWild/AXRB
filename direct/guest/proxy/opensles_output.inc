@@ -25,6 +25,17 @@ struct OutputObject {
   SLboolean mute;
   slAndroidSimpleBufferQueueCallback callback;
   void *callbackContext;
+  // Accepted and kept, though no object, play or marker events are raised:
+  // engines (Wwise through Oboe) refuse to use a player whose registration fails.
+  slObjectCallback objectCallback;
+  void *objectContext;
+  slPlayCallback playCallback;
+  void *playContext;
+  SLuint32 eventMask;
+  SLmillisecond marker, updatePeriod;
+  SLint32 priority;
+  SLboolean preemptable, stereoEnabled;
+  SLpermille stereoPosition;
   uint64_t frames;
   pthread_mutex_t lock;
   AAudioStream *stream;
@@ -63,6 +74,50 @@ static SLresult unsupported(void) {
   note("OpenSL ES: an unsupported method was called");
   return SL_RESULT_FEATURE_UNSUPPORTED;
 }
+// Unimplemented methods name themselves: one stub per table slot, filled in
+// by fill_table. Names follow the interfaces' declaration order.
+static const char *const kTableNames[6] = {"Object", "Engine", "Play", "BufferQueue", "Volume", "AndroidConfiguration"};
+static const char *const kMethodNames[6][15] = {
+    {"Realize", "Resume", "GetState", "GetInterface", "RegisterCallback", "AbortAsyncOperation", "Destroy",
+     "SetPriority", "GetPriority", "SetLossOfControlInterfaces"},
+    {"CreateLEDDevice", "CreateVibraDevice", "CreateAudioPlayer", "CreateAudioRecorder", "CreateMidiPlayer",
+     "CreateListener", "Create3DGroup", "CreateOutputMix", "CreateMetadataExtractor", "CreateExtensionObject",
+     "QueryNumSupportedInterfaces", "QuerySupportedInterfaces", "QueryNumSupportedExtensions",
+     "QuerySupportedExtension", "IsExtensionSupported"},
+    {"SetPlayState", "GetPlayState", "GetDuration", "GetPosition", "RegisterCallback", "SetCallbackEventsMask",
+     "GetCallbackEventsMask", "SetMarkerPosition", "ClearMarkerPosition", "GetMarkerPosition",
+     "SetPositionUpdatePeriod", "GetPositionUpdatePeriod"},
+    {"Enqueue", "Clear", "GetState", "RegisterCallback"},
+    {"SetVolumeLevel", "GetVolumeLevel", "GetMaxVolumeLevel", "SetMute", "GetMute", "EnableStereoPosition",
+     "IsEnabledStereoPosition", "SetStereoPosition", "GetStereoPosition"},
+    {"SetConfiguration", "GetConfiguration", "AcquireJavaProxy", "ReleaseJavaProxy"},
+};
+static SLresult unsupported_slot(int table, int slot) {
+  static unsigned char seen[6][16];  // each method is reported once
+  if (!seen[table][slot]) {
+    seen[table][slot] = 1;
+    const char *method = slot < 15 && kMethodNames[table][slot] ? kMethodNames[table][slot] : "?";
+    note("OpenSL ES: unsupported method %s::%s (slot %d) was called", kTableNames[table], method, slot);
+  }
+  return SL_RESULT_FEATURE_UNSUPPORTED;
+}
+#define AXRB_SL_STUB(t, i) \
+  static SLresult unsupported_##t##_##i(void) { return unsupported_slot(t, i); }
+#define AXRB_SL_SLOTS(X, t) \
+  X(t, 0) X(t, 1) X(t, 2) X(t, 3) X(t, 4) X(t, 5) X(t, 6) X(t, 7) X(t, 8) X(t, 9) X(t, 10) X(t, 11) X(t, 12) \
+  X(t, 13) X(t, 14) X(t, 15)
+AXRB_SL_SLOTS(AXRB_SL_STUB, 0)
+AXRB_SL_SLOTS(AXRB_SL_STUB, 1)
+AXRB_SL_SLOTS(AXRB_SL_STUB, 2)
+AXRB_SL_SLOTS(AXRB_SL_STUB, 3)
+AXRB_SL_SLOTS(AXRB_SL_STUB, 4)
+AXRB_SL_SLOTS(AXRB_SL_STUB, 5)
+#define AXRB_SL_ADDRESS(t, i) (void *)unsupported_##t##_##i,
+static void *const kStubs[6][16] = {
+    {AXRB_SL_SLOTS(AXRB_SL_ADDRESS, 0)}, {AXRB_SL_SLOTS(AXRB_SL_ADDRESS, 1)},
+    {AXRB_SL_SLOTS(AXRB_SL_ADDRESS, 2)}, {AXRB_SL_SLOTS(AXRB_SL_ADDRESS, 3)},
+    {AXRB_SL_SLOTS(AXRB_SL_ADDRESS, 4)}, {AXRB_SL_SLOTS(AXRB_SL_ADDRESS, 5)},
+};
 static SLresult object_interface(SLObjectItf self, const SLInterfaceID iid,
                                  void *result) {
   if (!result)
@@ -239,8 +294,24 @@ static SLresult queue_enqueue(SLAndroidSimpleBufferQueueItf self,
                               const void *data, SLuint32 bytes) {
   OutputObject *o = owner(self);
   if (!data || !bytes ||
-      bytes % (o->pcm.numChannels * (o->pcm.containerSize / 8)))
+      bytes % (o->pcm.numChannels * (o->pcm.containerSize / 8))) {
+    note("OpenSL ES: Enqueue of %u bytes refused (%u channels, %u-bit container)", (unsigned)bytes,
+         (unsigned)o->pcm.numChannels, (unsigned)o->pcm.containerSize);
     return SL_RESULT_PARAMETER_INVALID;
+  }
+  // The first buffers' size and loudness: silence the game wrote vs none at all.
+  static int reported;
+  if (reported < 3) {
+    ++reported;
+    float peak = 0;
+    if (o->pcm.containerSize == 32 && o->representation == SL_ANDROID_PCM_REPRESENTATION_FLOAT)
+      for (SLuint32 i = 0; i < bytes / 4; ++i) peak = fmaxf(peak, fabsf(((const float *)data)[i]));
+    else if (o->pcm.containerSize == 16)
+      for (SLuint32 i = 0; i < bytes / 2; ++i) peak = fmaxf(peak, fabsf(((const int16_t *)data)[i] / 32768.0f));
+    note("OpenSL ES: buffer %d enqueued: %u bytes, %u Hz, %u ch, %u-bit, representation %u, peak %.3f", reported,
+         (unsigned)bytes, (unsigned)(o->pcm.samplesPerSec / 1000), (unsigned)o->pcm.numChannels,
+         (unsigned)o->pcm.containerSize, (unsigned)o->representation, peak);
+  }
   pthread_mutex_lock(&o->lock);
   if (o->count == o->queueCapacity) {
     pthread_mutex_unlock(&o->lock);
@@ -363,6 +434,83 @@ static SLresult config_get(SLAndroidConfigurationItf self, const SLchar *key,
   memcpy(value, slot, 4);
   return 0;
 }
+// Optional methods: accepted and remembered. Games treat a refusal as fatal
+// for the player (Deadpool VR's Wwise retried Object::RegisterCallback
+// forever and never played); none of them changes the sound.
+static SLresult object_register(SLObjectItf self, slObjectCallback callback, void *context) {
+  OutputObject *o = owner(self);
+  pthread_mutex_lock(&o->lock);
+  o->objectCallback = callback;
+  o->objectContext = context;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+static SLresult object_resume(SLObjectItf self, SLboolean async) {
+  (void)async;
+  return owner(self)->state == SL_OBJECT_STATE_REALIZED ? SL_RESULT_SUCCESS : SL_RESULT_PRECONDITIONS_VIOLATED;
+}
+static void object_abort(SLObjectItf self) { (void)self; }
+static SLresult object_set_priority(SLObjectItf self, SLint32 priority, SLboolean preemptable) {
+  OutputObject *o = owner(self);
+  o->priority = priority;
+  o->preemptable = preemptable;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult object_get_priority(SLObjectItf self, SLint32 *priority, SLboolean *preemptable) {
+  if (!priority || !preemptable)
+    return SL_RESULT_PARAMETER_INVALID;
+  *priority = owner(self)->priority;
+  *preemptable = owner(self)->preemptable;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult object_loss_of_control(SLObjectItf self, SLint16 count, SLInterfaceID *ids, SLboolean enabled) {
+  (void)self; (void)count; (void)ids; (void)enabled;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult play_register(SLPlayItf self, slPlayCallback callback, void *context) {
+  OutputObject *o = owner(self);
+  pthread_mutex_lock(&o->lock);
+  o->playCallback = callback;
+  o->playContext = context;
+  pthread_mutex_unlock(&o->lock);
+  return SL_RESULT_SUCCESS;
+}
+static SLresult play_set_mask(SLPlayItf self, SLuint32 mask) { owner(self)->eventMask = mask; return SL_RESULT_SUCCESS; }
+static SLresult play_get_mask(SLPlayItf self, SLuint32 *mask) {
+  if (!mask)
+    return SL_RESULT_PARAMETER_INVALID;
+  *mask = owner(self)->eventMask;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult play_set_marker(SLPlayItf self, SLmillisecond marker) { owner(self)->marker = marker; return SL_RESULT_SUCCESS; }
+static SLresult play_clear_marker(SLPlayItf self) { owner(self)->marker = 0; return SL_RESULT_SUCCESS; }
+static SLresult play_get_marker(SLPlayItf self, SLmillisecond *marker) {
+  if (!marker)
+    return SL_RESULT_PARAMETER_INVALID;
+  *marker = owner(self)->marker;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult play_set_period(SLPlayItf self, SLmillisecond period) { owner(self)->updatePeriod = period; return SL_RESULT_SUCCESS; }
+static SLresult play_get_period(SLPlayItf self, SLmillisecond *period) {
+  if (!period)
+    return SL_RESULT_PARAMETER_INVALID;
+  *period = owner(self)->updatePeriod;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult volume_enable_stereo(SLVolumeItf self, SLboolean enable) { owner(self)->stereoEnabled = enable; return SL_RESULT_SUCCESS; }
+static SLresult volume_stereo_enabled(SLVolumeItf self, SLboolean *enabled) {
+  if (!enabled)
+    return SL_RESULT_PARAMETER_INVALID;
+  *enabled = owner(self)->stereoEnabled;
+  return SL_RESULT_SUCCESS;
+}
+static SLresult volume_set_stereo(SLVolumeItf self, SLpermille position) { owner(self)->stereoPosition = position; return SL_RESULT_SUCCESS; }
+static SLresult volume_get_stereo(SLVolumeItf self, SLpermille *position) {
+  if (!position)
+    return SL_RESULT_PARAMETER_INVALID;
+  *position = owner(self)->stereoPosition;
+  return SL_RESULT_SUCCESS;
+}
 static struct SLObjectItf_ objectTable;
 static struct SLEngineItf_ engineTable;
 static struct SLPlayItf_ playTable;
@@ -463,22 +611,40 @@ static SLresult engine_player(SLEngineItf self, SLObjectItf *out,
   *out = (SLObjectItf)&o->object;
   return 0;
 }
-static void fill_table(void *table, size_t bytes) {
+static void fill_table(void *table, size_t bytes, int id) {
   void **slots = table;
   for (size_t i = 0; i < bytes / sizeof(void *); ++i)
-    slots[i] = (void *)unsupported;
+    slots[i] = i < 16 ? kStubs[id][i] : (void *)unsupported;
 }
 static void initialize_tables(void) {
-  fill_table(&objectTable, sizeof(objectTable));
-  fill_table(&engineTable, sizeof(engineTable));
-  fill_table(&playTable, sizeof(playTable));
-  fill_table(&queueTable, sizeof(queueTable));
-  fill_table(&volumeTable, sizeof(volumeTable));
-  fill_table(&configTable, sizeof(configTable));
+  fill_table(&objectTable, sizeof(objectTable), 0);
+  fill_table(&engineTable, sizeof(engineTable), 1);
+  fill_table(&playTable, sizeof(playTable), 2);
+  fill_table(&queueTable, sizeof(queueTable), 3);
+  fill_table(&volumeTable, sizeof(volumeTable), 4);
+  fill_table(&configTable, sizeof(configTable), 5);
   objectTable.Realize = object_realize;
   objectTable.GetState = object_state;
   objectTable.GetInterface = object_interface;
   objectTable.Destroy = object_destroy;
+  objectTable.RegisterCallback = object_register;
+  objectTable.Resume = object_resume;
+  objectTable.AbortAsyncOperation = object_abort;
+  objectTable.SetPriority = object_set_priority;
+  objectTable.GetPriority = object_get_priority;
+  objectTable.SetLossOfControlInterfaces = object_loss_of_control;
+  playTable.RegisterCallback = play_register;
+  playTable.SetCallbackEventsMask = play_set_mask;
+  playTable.GetCallbackEventsMask = play_get_mask;
+  playTable.SetMarkerPosition = play_set_marker;
+  playTable.ClearMarkerPosition = play_clear_marker;
+  playTable.GetMarkerPosition = play_get_marker;
+  playTable.SetPositionUpdatePeriod = play_set_period;
+  playTable.GetPositionUpdatePeriod = play_get_period;
+  volumeTable.EnableStereoPosition = volume_enable_stereo;
+  volumeTable.IsEnabledStereoPosition = volume_stereo_enabled;
+  volumeTable.SetStereoPosition = volume_set_stereo;
+  volumeTable.GetStereoPosition = volume_get_stereo;
   engineTable.CreateAudioPlayer = engine_player;
   engineTable.CreateOutputMix = engine_mix;
   playTable.SetPlayState = play_set;
