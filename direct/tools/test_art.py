@@ -121,8 +121,10 @@ def main():
         run(flags + [source / 'gles_selftest.c', '-lEGL', '-lGLESv3', '-lvulkan', '-o', binary])
         run([runner, '--host-graphics', '--sysroot', root, '--data', work / 'data', '--prop', 'ro.hardware.egl=angle',
              '--mount-ro', '/system/lib64/libvulkan.so=' + str(bridges / 'guest/lib64/libvulkan.so'),
-             '--mount-ro', '/system/lib64/libEGL_angle.so=' + str(bridges / 'guest/lib64/libEGL_angle.so'),
-             '--mount-ro', '/system/lib64/libEGL_angle_real.so=' + str(root / 'system/lib64/libEGL_angle.so'), binary],
+             *[item for name in ('EGL', 'GLESv2') for item in (
+                 '--mount-ro', f'/system/lib64/lib{name}_angle.so=' + str(bridges / f'guest/lib64/lib{name}_angle.so'),
+                 '--mount-ro', f'/system/lib64/lib{name}_angle_real.so=' + str(root / f'system/lib64/lib{name}_angle.so'))],
+             binary],
             log=work / 'gles-selftest.log', marker='GLES_SELFTEST_PASS', timeout=60)
 
 

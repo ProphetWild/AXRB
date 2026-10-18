@@ -219,10 +219,12 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
     if egl == 'angle':
         for name in ('EGL', 'GLESv1_CM', 'GLESv2'):
             required(sysroot / 'system/lib64' / ('lib' + name + '_angle.so'))
-        # ANGLE's libEGL behind a shim that adds the multisampled multiview
-        # attachment Unreal uses (direct/guest/proxy/libEGL_angle.c).
-        mount('/system/lib64/libEGL_angle.so', proxies / 'libEGL_angle.so')
-        mount('/system/lib64/libEGL_angle_real.so', sysroot / 'system/lib64/libEGL_angle.so')
+        # ANGLE's libEGL and libGLESv2 behind shims that add the multisampled
+        # multiview attachment Unreal uses, and its extension name
+        # (direct/guest/proxy/lib*_angle.c).
+        for name in ('EGL', 'GLESv2'):
+            mount('/system/lib64/lib' + name + '_angle.so', proxies / ('lib' + name + '_angle.so'))
+            mount('/system/lib64/lib' + name + '_angle_real.so', sysroot / 'system/lib64' / ('lib' + name + '_angle.so'))
         # Unreal asks for a no-error context when offered; without ANGLE's
         # validation, a call its Quest driver tolerates crashes ANGLE. Quest
         # games render with multisampled render-to-texture, which ANGLE offers

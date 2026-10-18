@@ -638,6 +638,31 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart,
 #endif
         reportedLayers = true;
     }
+#if defined(__ANDROID__)
+    // When the composition changes (a loading screen's quads giving way to the
+    // scene's projection, say): the layer types in order, a few dozen times.
+    if (!batchPart && !validateOnly) {
+        static uint64_t lastComposition = ~0ull;
+        static unsigned compositionReports = 0;
+        uint64_t composition = info.layerCount;
+        char types[96] = "";
+        for (uint32_t i = 0; info.layers && i < info.layerCount && i < 8; ++i) {
+            const auto* item = static_cast<const XrCompositionLayerBaseHeader*>(info.layers[i]);
+            const int type = item ? static_cast<int>(item->type) : 0;
+            composition = composition * 131 + static_cast<uint64_t>(type);
+            const size_t used = std::strlen(types);
+            std::snprintf(types + used, sizeof types - used, "%s%s", used ? " " : "",
+                type == XR_TYPE_COMPOSITION_LAYER_PROJECTION ? "projection" : type == XR_TYPE_COMPOSITION_LAYER_QUAD ? "quad" :
+                type == XR_TYPE_COMPOSITION_LAYER_EQUIRECT2_KHR ? "equirect" : "other");
+        }
+        if (composition != lastComposition && compositionReports < 32) {
+            ++compositionReports;
+            __android_log_print(ANDROID_LOG_INFO, "AXRB.Layer", "composition: %u layer(s): %s", info.layerCount,
+                                info.layerCount ? types : "none");
+        }
+        lastComposition = composition;
+    }
+#endif
     if (info.layerCount == 0) {
 #if defined(__ANDROID__)
         if (g_vulkan.active() && g_vulkan.gpu_export_enabled() &&

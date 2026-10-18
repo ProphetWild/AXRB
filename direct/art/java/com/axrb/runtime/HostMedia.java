@@ -90,8 +90,14 @@ public final class HostMedia {
         return result;
     }
     public static void surface(MediaPlayer player, Surface surface) {
-        if (surface != null && !(surface instanceof HostSurface))
-            throw new UnsupportedOperationException("Media output requires an AXRB host surface");
+        // Only AXRB host surfaces show the host decoder's frames. Any other
+        // (a GL SurfaceTexture, as Unreal's movie player passes) plays the
+        // audio and completes without picture: throwing here would surface as
+        // a Java exception inside the engine's JNI call, which Unreal aborts on.
+        if (surface != null && !(surface instanceof HostSurface)) {
+            android.util.Log.w("AXRB.Media", "MediaPlayer output is not an AXRB host surface; video plays without picture");
+            surface = null;
+        }
         command(2, state(player).id, surface == null ? 0 : ((HostSurface)surface).mediaHandle, 0, 0);
     }
     public static int invoke(MediaPlayer player, Parcel request, Parcel reply) {

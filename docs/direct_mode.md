@@ -61,7 +61,11 @@ swapchain image has a 2D texture that ANGLE exports as a VkImage
 (`EGL_ANGLE_vulkan_image`); the game's texture (2D, or a multiview array with
 its layers stacked) is copied into it at `xrReleaseSwapchainImage` and handed
 over with `GL_ANGLE_vulkan_image`, and the export copies run on ANGLE's queue
-under its queue lock (`runtime/src/gles_angle.cpp`). Host MediaPlayer currently decodes video, with game audio
+under its queue lock (`runtime/src/gles_angle.cpp`). Small shims in front of
+ANGLE's libEGL and libGLESv2 (`direct/guest/proxy/lib*_angle.c`) add the
+multisampled multiview attachment Quest builds of Unreal use, which ANGLE
+lacks. Java `MediaExtractor` and `AMediaExtractor` use the host's extractor, as
+there is no media.extractor service. Host MediaPlayer currently decodes video, with game audio
 handled separately through native audio APIs. Startup verification is not a
 claim that every title, online feature or gameplay path works.
 

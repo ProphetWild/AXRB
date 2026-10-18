@@ -156,6 +156,8 @@ int main(void) {
     printf("GL vendor=%s\nGL renderer=%s\nGL version=%s\nGLSL=%s\n", glGetString(GL_VENDOR), glGetString(GL_RENDERER),
            glGetString(GL_VERSION), glGetString(GL_SHADING_LANGUAGE_VERSION));
     printf("GL extensions=%s\n", glGetString(GL_EXTENSIONS));
+    // Named by Direct mode's libGLESv2_angle.so shim, beside ANGLE's multiview.
+    REQUIRE(strstr((const char*)glGetString(GL_EXTENSIONS), "GL_OVR_multiview_multisampled_render_to_texture"));
 
     glClearColor(1, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);

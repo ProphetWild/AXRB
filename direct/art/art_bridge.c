@@ -6,6 +6,7 @@
 
 extern long axrb_window_register(ANativeWindow*, int, int);
 extern int register_art_media(JNIEnv*);
+extern int register_art_extractor(JNIEnv*);
 AXRB_HOST_FUNCTION(axrb_window_register, "art.window_register");
 extern long axrb_stop_requested(void);
 AXRB_HOST_FUNCTION(axrb_stop_requested, "art.stop_requested");
@@ -196,6 +197,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     };
     if (!track || (*env)->RegisterNatives(env, track, track_queries, sizeof track_queries / sizeof track_queries[0]) != 0) return JNI_ERR;
     if (register_art_media(env) != 0) return JNI_ERR;
+    if (register_art_extractor(env) != 0) return JNI_ERR;
     return JNI_VERSION_1_6;
 }
 
