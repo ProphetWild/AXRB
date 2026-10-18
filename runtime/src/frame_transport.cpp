@@ -880,8 +880,21 @@ XrResult submit_projection_frame(const XrFrameEndInfo& info, uint32_t batchPart,
         // edge, and its clamped source is scaled to the same output size.
         const uint32_t eyeWidth = std::min<uint32_t>(g_renderWidth, requested.extent.width);
         const uint32_t eyeHeight = std::min<uint32_t>(g_renderHeight, requested.extent.height);
-        if (eye == 0) { width = eyeWidth; height = eyeHeight; }
-        if (width != eyeWidth || height != eyeHeight) { return invalid("unequal eye dimensions"); }
+        // Eyes may differ in size (OpenXR allows it; Marvel's Deadpool VR's do):
+        // both are exported at the larger size, each eye's source rectangle
+        // scaled to it, which keeps each eye's own field of view intact.
+        if (eye == 1 && (width != eyeWidth || height != eyeHeight)) {
+#if defined(__ANDROID__)
+            static bool reportedUnequal = false;
+            if (!validateOnly && !reportedUnequal) {
+                __android_log_print(ANDROID_LOG_INFO, "AXRB.Layer", "eyes differ in size: %ux%u and %ux%u; both exported at %ux%u",
+                                    width, height, eyeWidth, eyeHeight, std::max(width, eyeWidth), std::max(height, eyeHeight));
+                reportedUnequal = true;
+            }
+#endif
+        }
+        width = std::max(width, eyeWidth);
+        height = std::max(height, eyeHeight);
         swapchains[eye] = sc;
         if (quads || equirect) continue;
         const auto& view = layer->views[eye];

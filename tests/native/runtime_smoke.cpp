@@ -878,6 +878,10 @@ int main()
     projectionViews[1].subImage.imageRect.offset.x = 1 << 20;
     if (xrEndFrame(session, &endInfo) != XR_ERROR_SWAPCHAIN_RECT_INVALID) { return EXIT_FAILURE; }
     projectionViews[1].subImage.imageRect.offset.x = 0;
+    // Eyes of different sizes are exported at the larger one (Marvel's Deadpool VR).
+    projectionViews[1].subImage.imageRect.extent.width -= 8;
+    if (xrEndFrame(session, &endInfo) != XR_SUCCESS) { return EXIT_FAILURE; }
+    projectionViews[1].subImage.imageRect.extent.width += 8;
     projectionViews[1].fov.angleLeft = projectionViews[1].fov.angleRight;
     if (xrEndFrame(session, &endInfo) != XR_ERROR_LAYER_INVALID) { return EXIT_FAILURE; }
     projectionViews[1].fov = views[1].fov;
