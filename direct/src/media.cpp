@@ -21,6 +21,7 @@
 #include <mfreadwrite.h>
 #include <shlwapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -144,6 +145,12 @@ public:
         MFGetAttributeSize(actual.p, MF_MT_FRAME_SIZE, &w, &h);
         width_ = w;
         height_ = h;
+        // A negative stride is a bottom-up image.
+        UINT32 stride = 0;
+        if (SUCCEEDED(actual->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride)))
+            stride_ = static_cast<LONG>(stride);
+        else if (FAILED(MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1, w, &stride_)))
+            stride_ = static_cast<LONG>(w * 4);
         PROPVARIANT duration;
         PropVariantInit(&duration);
         if (SUCCEEDED(reader_->GetPresentationAttribute(static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE),
@@ -159,6 +166,14 @@ public:
 
     void start() {
         if (!prepared_) return;
+        // Started again after it completed: the decode thread has ended, and
+        // playback restarts from the beginning, as Android's MediaPlayer does
+        // (Unreal loops a movie this way; the player sat at its end forever).
+        if (completed_ && thread_.joinable()) {
+            thread_.join();
+            std::lock_guard<std::mutex> guard(lock_);
+            if (seek_100ns_ < 0) seek_100ns_ = 0;
+        }
         std::unique_lock<std::mutex> guard(lock_);
         playing_ = true;
         completed_ = false;
@@ -272,6 +287,20 @@ private:
         CoUninitialize();
     }
 
+    // A linear buffer can hold the decoder's padded frame, whatever the media
+    // type says: a 1908x1556 video comes as 1920x1568 (12042240 bytes), with
+    // 7680-byte rows. The padding that matches the buffer size gives the rows.
+    LONG linear_row_bytes(DWORD length) const {
+        const LONG declared = std::max<LONG>(static_cast<LONG>(width_ * 4), std::abs(stride_));
+        if (static_cast<uint64_t>(declared) * height_ == length) return declared;
+        for (uint32_t across : {16u, 32u, 64u, 128u})
+            for (uint32_t down : {1u, 2u, 16u, 32u, 64u}) {
+                const uint64_t w = (width_ + across - 1) / across * across, h = (height_ + down - 1) / down * down;
+                if (w * h * 4 == length) return static_cast<LONG>(w * 4);
+            }
+        return declared;
+    }
+
     void publish(IMFSample* sample) {
         std::shared_ptr<FrameSlot> slot;
         {
@@ -290,15 +319,19 @@ private:
                         SUCCEEDED(planar->Lock2D(&scan0, &pitch));
         if (!locked2d) {
             if (FAILED(buffer->Lock(&raw, nullptr, &length))) return;
-            scan0 = raw;
-            pitch = static_cast<LONG>(width_ * 4);
-            if (length < width_ * height_ * 4) {
+            const LONG rows = linear_row_bytes(length);
+            if (length < static_cast<DWORD>(rows) * (height_ - 1) + width_ * 4) {
                 buffer->Unlock();
                 return;
             }
+            pitch = stride_ < 0 ? -rows : rows;
+            scan0 = stride_ < 0 ? raw + static_cast<ptrdiff_t>(rows) * (height_ - 1) : raw;
         }
         {
             std::lock_guard<std::mutex> guard(slot->lock);
+            if (!slot->serial)
+                LOGI("media", "MediaPlayer: %ux%u frames, %ld-byte rows (%s buffer, %lu bytes)", width_,
+                     height_, static_cast<long>(pitch), locked2d ? "2D" : "linear", static_cast<unsigned long>(length));
             slot->width = width_;
             slot->height = height_;
             slot->rgba.resize(static_cast<size_t>(width_) * height_ * 4);
@@ -345,6 +378,7 @@ private:
     std::atomic<int64_t> position_100ns_{0};
     int32_t duration_ms_ = 0;
     uint32_t width_ = 0, height_ = 0;
+    LONG stride_ = 0;
 };
 
 std::mutex g_players_lock;

@@ -22,6 +22,9 @@ public final class HostMedia {
     static native long command(int operation, long id, long a, long b, long c);
     static native long readFrame(long surface, long destination, int width, int height, long previous);
     static native void releaseSurface(long surface);
+    // The host frame slot for a Surface made from a SurfaceTexture, or 0
+    // (direct/art/art_surface_texture.c shows the frames on its GL texture).
+    static native long attachTexture(Surface surface, long player);
     private static State state(MediaPlayer player) {
         try {
             State state = players.get((Long)Reflect.field(player, "mNativeContext"));
@@ -90,27 +93,48 @@ public final class HostMedia {
         return result;
     }
     public static void surface(MediaPlayer player, Surface surface) {
-        // Only AXRB host surfaces show the host decoder's frames. Any other
-        // (a GL SurfaceTexture, as Unreal's movie player passes) plays the
-        // audio and completes without picture: throwing here would surface as
-        // a Java exception inside the engine's JNI call, which Unreal aborts on.
-        if (surface != null && !(surface instanceof HostSurface)) {
-            android.util.Log.w("AXRB.Media", "MediaPlayer output is not an AXRB host surface; video plays without picture");
-            surface = null;
+        // AXRB host surfaces and Surfaces made from a SurfaceTexture (a GL
+        // external texture, as Unreal's movie player uses) show the host
+        // decoder's frames. Any other plays the audio and completes without
+        // picture: throwing here would surface as a Java exception inside the
+        // engine's JNI call, which Unreal aborts on.
+        State state = state(player);
+        long handle = 0;
+        if (surface instanceof HostSurface) handle = ((HostSurface)surface).mediaHandle;
+        else if (surface != null) {
+            handle = attachTexture(surface, state.id);
+            if (handle == 0) android.util.Log.w("AXRB.Media", "MediaPlayer output is not an AXRB host surface; video plays without picture");
         }
-        command(2, state(player).id, surface == null ? 0 : ((HostSurface)surface).mediaHandle, 0, 0);
+        command(2, state.id, handle, 0, 0);
     }
     public static int invoke(MediaPlayer player, Parcel request, Parcel reply) {
-        state(player);
+        State state = state(player);
         request.setDataPosition(0);
         request.enforceInterface("android.media.IMediaPlayer");
         int operation = request.readInt();
+        // The host decoder's tracks as Android lists them: one video track once
+        // prepared, no audio, subtitle or timed-text tracks. Unreal's movie
+        // player finds video only through getTrackInfo(); with an empty list it
+        // never selects the track, never fetches a frame and its media time
+        // never advances (Star Wars: Tales from the Galaxy's Edge waits on it).
+        boolean video = command(13, state.id, 0, 0, 0) > 0;
         if (reply != null) {
-            reply.writeInt(0);
-            if (operation == 1) reply.writeInt(0); // No subtitle or timed-text tracks in the host decoder.
-            if (operation == 7) reply.writeInt(-1);
+            if (operation == 1) { // INVOKE_ID_GET_TRACK_INFO, read as Parcel.createTypedArray
+                reply.writeInt(video ? 1 : 0);
+                if (video) {
+                    reply.writeInt(1); // non-null element
+                    reply.writeInt(1); // MEDIA_TRACK_TYPE_VIDEO
+                    reply.writeString("video/avc");
+                    reply.writeString("und");
+                }
+            } else if (operation == 7) { // INVOKE_ID_GET_SELECTED_TRACK: the video track is always on
+                reply.writeInt(request.readInt() == 1 && video ? 0 : -1);
+            } else {
+                reply.writeInt(0);
+            }
             reply.setDataPosition(0);
         }
-        return operation == 1 || operation == 6 || operation == 7 || operation == 8 ? 0 : -38;
+        // 4 and 5 select or deselect a track: accepted, the single video track stays on.
+        return operation == 1 || operation == 4 || operation == 5 || operation == 6 || operation == 7 || operation == 8 ? 0 : -38;
     }
 }
