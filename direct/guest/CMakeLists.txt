@@ -39,15 +39,6 @@ file(MAKE_DIRECTORY "${GUEST_OUT}/lib64")
 set(P "${CMAKE_CURRENT_SOURCE_DIR}/proxy")
 axrb_guest(lib64/libandroid.so KIND lib SOURCES "${P}/libandroid.c" "${P}/native_activity.c")
 axrb_guest(lib64/libEGL.so KIND lib SOURCES "${P}/libEGL.c")
-# ANGLE's libEGL with an added multiview function and its libGLESv2 naming
-# that function's extension; the real ones, mounted as lib*_angle_real.so, are
-# linked through empty stubs of those names.
-file(MAKE_DIRECTORY "${GUEST_OUT}/stub")
-foreach(angle_lib EGL GLESv2)
-  axrb_guest(stub/lib${angle_lib}_angle_real.so KIND lib SOURCES "${P}/lib${angle_lib}_angle.c" FLAGS -DAXRB_LINK_STUB)
-  axrb_guest(lib64/lib${angle_lib}_angle.so KIND lib SOURCES "${P}/lib${angle_lib}_angle.c"
-    DEPENDS "${GUEST_OUT}/stub/lib${angle_lib}_angle_real.so" FLAGS "${GUEST_OUT}/stub/lib${angle_lib}_angle_real.so" -ldl)
-endforeach()
 axrb_guest(lib64/libGLESv1_CM.so KIND lib SOURCES "${P}/libGLES.c")
 axrb_guest(lib64/libGLESv2.so KIND lib SOURCES "${P}/libGLES.c")
 axrb_guest(lib64/libGLESv3.so KIND lib SOURCES "${P}/libGLES.c")

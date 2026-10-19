@@ -122,10 +122,7 @@ def main():
          '-laaudio', '-lm', '-Wl,-soname,libOpenSLES.so', '-o', a.output / 'libOpenSLES.so'])
     run([clang, *flags, '-c', source / 'art_bridge.c', '-o', a.output / 'art_bridge.o'])
     run([clang, *flags, '-c', source / 'art_media.c', '-o', a.output / 'art_media.o'])
-    run([clang, *flags, '-c', source / 'art_extractor.c', '-o', a.output / 'art_extractor.o'])
-    run([clang, *flags, '-c', source / 'art_surface_texture.c', '-o', a.output / 'art_surface_texture.o'])
     run([cxx, *flags, '-shared', source / 'art_binder.cpp', a.output / 'art_bridge.o', a.output / 'art_media.o',
-         a.output / 'art_extractor.o', a.output / 'art_surface_texture.o', '-lEGL', '-lGLESv3',
          '-landroid', '-ldl', '-lbinder_ndk', '-static-libstdc++', '-o', a.output / 'libaxrb_art_bridge.so'])
     shutil.copyfile(a.sysroot / 'system/etc/NOTICE.xml.gz', a.output / 'AOSP-NOTICE.xml.gz')
     tools = (clang, cxx, nm)

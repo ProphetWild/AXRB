@@ -26,20 +26,6 @@ XrResult XRAPI_CALL xrCreateSession_impl(
             if (!g_vulkan.initialize(*reinterpret_cast<const XrGraphicsBindingVulkanKHR*>(next))) return XR_ERROR_GRAPHICS_DEVICE_INVALID;
             break;
         }
-        if (next->type == XR_TYPE_GRAPHICS_BINDING_OPENGL_ES_ANDROID_KHR) {
-            // OpenGL ES through ANGLE exports its frames from ANGLE's Vulkan
-            // device like a Vulkan application's; any other driver reads back.
-            struct GlesBinding { XrStructureType type; const void* next; void* display; void* config; void* context; };
-            XrGraphicsBindingVulkanKHR binding{};
-            VkQueue queue = VK_NULL_HANDLE;
-            VulkanQueueLock lock{};
-            if (g_gles.initialize(reinterpret_cast<const GlesBinding*>(next)->display, binding, queue, lock) &&
-                !g_vulkan.initialize(binding, queue, lock)) {
-                __android_log_print(ANDROID_LOG_WARN, "AXRB.GLES", "ANGLE's Vulkan device was not accepted; frames use pixel readback");
-                g_gles.shutdown();
-            }
-            break;
-        }
     }
 #endif
     *session = fake_session();
@@ -67,7 +53,6 @@ XrResult XRAPI_CALL xrDestroySession_impl(XrSession session)
     for (auto& tracker : g_handTrackers) tracker.alive = false;
 #if defined(__ANDROID__)
     g_vulkan.shutdown();
-    g_gles.shutdown();
 #endif
     return XR_SUCCESS;
 }

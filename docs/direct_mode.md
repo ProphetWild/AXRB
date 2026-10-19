@@ -50,22 +50,8 @@ This integrates real AOSP userspace and ART, but does not boot a complete Androi
 platform services are still compatibility work. In particular, Meta/Ubisoft
 account services, Play services, hardware DRM, split APK installation and full
 Android multi-process execution are not supplied by this backend. Rendering
-goes through Vulkan. OpenGL ES games run on the AOSP image's ANGLE, which draws
-through the same forwarded Vulkan driver: `prepare_art_session.py --gles auto`
-selects it for Unreal games built without Vulkan
-(`GameActivity.bSupportsVulkan=false`), `--gles angle|stub` forces a choice
-(`run_direct_game.ps1 -Gles`, or `AXRB_DIRECT_GLES`). Other games keep an EGL
-stub with no display, so a Vulkan game never starts a second GL device. The
-OpenXR runtime exports a GLES game's frames from ANGLE's Vulkan device: each
-swapchain image has a 2D texture that ANGLE exports as a VkImage
-(`EGL_ANGLE_vulkan_image`); the game's texture (2D, or a multiview array with
-its layers stacked) is copied into it at `xrReleaseSwapchainImage` and handed
-over with `GL_ANGLE_vulkan_image`, and the export copies run on ANGLE's queue
-under its queue lock (`runtime/src/gles_angle.cpp`). Small shims in front of
-ANGLE's libEGL and libGLESv2 (`direct/guest/proxy/lib*_angle.c`) add the
-multisampled multiview attachment Quest builds of Unreal use, which ANGLE
-lacks. Java `MediaExtractor` and `AMediaExtractor` use the host's extractor, as
-there is no media.extractor service. Host MediaPlayer currently decodes video, with game audio
+currently depends on Vulkan; the EGL frontend can be probed but does not provide
+an OpenGL ES renderer. Host MediaPlayer currently decodes video, with game audio
 handled separately through native audio APIs. Startup verification is not a
 claim that every title, online feature or gameplay path works.
 

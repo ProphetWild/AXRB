@@ -13,7 +13,7 @@ set(AXRB_RUNTIME_SOURCES
 )
 set(AXRB_RUNTIME_SOURCES ${AXRB_RUNTIME_SOURCES} PARENT_SCOPE)
 
-add_library(openxr_runtime SHARED ${AXRB_RUNTIME_SOURCES} pose_client.cpp vulkan_backend.cpp gles_angle.cpp android_surface.cpp android_surface_swapchain.cpp vulkan_surface.cpp)
+add_library(openxr_runtime SHARED ${AXRB_RUNTIME_SOURCES} pose_client.cpp vulkan_backend.cpp android_surface.cpp android_surface_swapchain.cpp vulkan_surface.cpp)
 
 target_include_directories(openxr_runtime
   PRIVATE
@@ -31,7 +31,7 @@ if(ANDROID)
   option(AXRB_BUILD_VULKAN_SMOKE "Build the on-device Vulkan readback regression" OFF)
   if(AXRB_BUILD_VULKAN_SMOKE)
     add_executable(axrb_vulkan_smoke ${PROJECT_SOURCE_DIR}/tests/android/vulkan_android_smoke.cpp
-      ${AXRB_RUNTIME_SOURCES} pose_client.cpp vulkan_backend.cpp gles_angle.cpp
+      ${AXRB_RUNTIME_SOURCES} pose_client.cpp vulkan_backend.cpp
       android_surface.cpp android_surface_swapchain.cpp vulkan_surface.cpp)
     target_include_directories(axrb_vulkan_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/protocol)
     target_link_libraries(axrb_vulkan_smoke PRIVATE axrb_protocol vulkan log GLESv3 EGL android)

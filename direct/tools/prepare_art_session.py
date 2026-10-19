@@ -113,88 +113,6 @@ def boot_classpath(sysroot):
     return ':'.join(boot)
 
 
-def manifest_elements(apk):
-    """(tag, {attribute: value}) for each element of the APK's binary AndroidManifest.xml.
-
-    Attribute names come from the android: resource ids where present; values
-    are strings, booleans or integers."""
-    import struct
-    with zipfile.ZipFile(apk) as archive:
-        data = archive.read('AndroidManifest.xml')
-    strings, ids, elements = [], [], []
-    offset = struct.unpack_from('<H', data, 2)[0]
-    while offset + 8 <= len(data):
-        kind, header, size = struct.unpack_from('<HHI', data, offset)
-        if size < 8:
-            break
-        if kind == 0x0001:  # string pool
-            count, _, flags, start = struct.unpack_from('<IIII', data, offset + 8)
-            utf8 = flags & 0x100
-            for i in range(count):
-                at = offset + start + struct.unpack_from('<I', data, offset + header + 4 * i)[0]
-                if utf8:
-                    at += 2 if data[at] & 0x80 else 1  # length in characters
-                    length = data[at]
-                    if length & 0x80:
-                        length, at = ((length & 0x7F) << 8) | data[at + 1], at + 2
-                    else:
-                        at += 1
-                    strings.append(data[at:at + length].decode('utf-8', 'replace'))
-                else:
-                    length = struct.unpack_from('<H', data, at)[0]
-                    if length & 0x8000:
-                        length, at = ((length & 0x7FFF) << 16) | struct.unpack_from('<H', data, at + 2)[0], at + 4
-                    else:
-                        at += 2
-                    strings.append(data[at:at + 2 * length].decode('utf-16-le', 'replace'))
-        elif kind == 0x0180:  # resource ids of the first strings
-            ids = list(struct.unpack_from(f'<{(size - header) // 4}I', data, offset + header))
-        elif kind == 0x0102:  # start element
-            name, start, step, count = struct.unpack_from('<IHHH', data, offset + 20)
-            attributes = {}
-            for i in range(count):
-                at = offset + 16 + start + i * step
-                _, key, raw, _, kind_, value = struct.unpack_from('<IIIHxBI', data, at)
-                label = {0x01010003: 'name', 0x01010024: 'value', 0x01010281: 'glEsVersion',
-                         0x0101028e: 'required'}.get(ids[key] if key < len(ids) else 0,
-                                                     strings[key] if key < len(strings) else '')
-                if kind_ == 0x03:
-                    attributes[label] = strings[value] if value < len(strings) else ''
-                elif kind_ == 0x12:
-                    attributes[label] = value != 0
-                elif raw != 0xFFFFFFFF and raw < len(strings):
-                    attributes[label] = strings[raw]
-                else:
-                    attributes[label] = value
-            elements.append((strings[name] if name < len(strings) else '', attributes))
-        offset += size
-    return elements
-
-
-# Unreal's switch for its Vulkan renderer. Without it the game renders with
-# OpenGL ES, which Direct mode provides through ANGLE on the forwarded Vulkan
-# driver. Other games keep the EGL stub, so a Vulkan game never starts a
-# second (GL) device it does not use.
-UNREAL_VULKAN_KEYS = ('com.epicgames.ue4.GameActivity.bSupportsVulkan',
-                      'com.epicgames.unreal.GameActivity.bSupportsVulkan')
-
-
-def gles_driver(apk, choice='auto'):
-    if choice in ('angle', 'stub'):
-        return choice
-    if choice != 'auto':
-        raise ValueError(f'Unknown OpenGL ES driver: {choice}')
-    try:
-        elements = manifest_elements(apk)
-    except (KeyError, ValueError, IndexError, zipfile.BadZipFile, __import__('struct').error):
-        return 'stub'
-    for tag, attributes in elements:
-        if tag == 'meta-data' and attributes.get('name') in UNREAL_VULKAN_KEYS:
-            value = attributes.get('value')
-            return 'stub' if value is True or str(value).lower() == 'true' else 'angle'
-    return 'stub'
-
-
 # What Unity's older Oculus hardware check and Oculus loaders read on a Quest.
 QUEST_IDENTITY = {'manufacturer': 'Oculus', 'brand': 'oculus', 'model': 'Quest 3'}
 LEGACY_DRIVER_ROOT = '/data/app/com.oculus.systemdriver-axrb'
@@ -203,7 +121,7 @@ LEGACY_DRIVER_ROOT = '/data/app/com.oculus.systemdriver-axrb'
 def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
             runtime=None, assets=None, check_jni=False, diagnostics=False,
             legacy_oculus_driver=None, quest_identity=False, controllers_only=False, textures='rgba8',
-            render_scale=1.0, gles='auto', hide_space_warp=False):
+            render_scale=1.0, hide_space_warp=False):
     apk, bootstrap = required(apk), required(bootstrap)
     sysroot, data = Path(sysroot).resolve(), Path(data).resolve()
     native, proxies = Path(native), Path(proxies)
@@ -236,27 +154,8 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
         mount('/system/lib64/' + name, proxies / name)
     for name in ('libandroid.so', 'libaxrbndk.so', 'libmediandk.so', 'libaxrbmndk.so', 'libaxrb_art_bridge.so', 'libOpenSLES.so'):
         mount('/system/lib64/' + name, native / name)
-    # OpenGL ES: ANGLE from the AOSP image (libEGL loads /system/lib64/lib*_angle.so
-    # for ro.hardware.egl=angle), or the stub that has no display.
-    egl = gles_driver(apk, gles)
-    if egl == 'angle':
-        for name in ('EGL', 'GLESv1_CM', 'GLESv2'):
-            required(sysroot / 'system/lib64' / ('lib' + name + '_angle.so'))
-        # ANGLE's libEGL and libGLESv2 behind shims that add the multisampled
-        # multiview attachment Unreal uses, and its extension name
-        # (direct/guest/proxy/lib*_angle.c).
-        for name in ('EGL', 'GLESv2'):
-            mount('/system/lib64/lib' + name + '_angle.so', proxies / ('lib' + name + '_angle.so'))
-            mount('/system/lib64/lib' + name + '_angle_real.so', sysroot / 'system/lib64' / ('lib' + name + '_angle.so'))
-        # Unreal asks for a no-error context when offered; without ANGLE's
-        # validation, a call its Quest driver tolerates crashes ANGLE. Quest
-        # games render with multisampled render-to-texture, which ANGLE offers
-        # on desktop GPUs only when asked (otherwise libEGL hands out stubs).
-        args.extend(['--prop', 'debug.angle.feature_overrides_enabled=forceGlErrorChecking:enableMultisampledRenderToTexture'])
-    else:
-        egl = 'axrb'
-        for name in ('EGL', 'GLESv1_CM', 'GLESv2'):
-            mount('/vendor/lib64/egl/lib' + name + '_axrb.so', proxies / ('lib' + name + '.so'))
+    for name in ('EGL', 'GLESv1_CM', 'GLESv2'):
+        mount('/vendor/lib64/egl/lib' + name + '_axrb.so', proxies / ('lib' + name + '.so'))
     mount('/data/app/axrb/lib/arm64/libopenxr_runtime.so', runtime or proxies / 'libopenxr_runtime.so')
     if app_root != '/data/app/axrb':
         mount(app_root + '/lib/arm64/libopenxr_runtime.so', runtime or proxies / 'libopenxr_runtime.so')
@@ -289,7 +188,7 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
         for key, value in QUEST_IDENTITY.items():
             for scope in ('', 'system.', 'vendor.', 'product.', 'odm.', 'system_ext.'):
                 args.extend(['--prop', f'ro.product.{scope}{key}={value}'])
-    for prop in ('ro.hardware.egl=' + egl, 'servicemanager.ready=true',
+    for prop in ('ro.hardware.egl=axrb', 'servicemanager.ready=true',
                  'dalvik.vm.usejit=false', 'dalvik.vm.usejitprofiles=false'):
         args.extend(['--prop', prop])
     # How ASTC textures are stored: uncompressed RGBA8 decoded on the GPU,
@@ -334,8 +233,6 @@ def main():
     parser.add_argument('--render-scale', type=float, default=1.0)
     parser.add_argument('--hide-space-warp', action='store_true',
                         help="hide XR_FB_space_warp in OVRPort's shim so the game renders without Application SpaceWarp")
-    parser.add_argument('--gles', choices=('auto', 'angle', 'stub'), default='auto',
-                        help='OpenGL ES driver: ANGLE, the stub, or ANGLE for Unreal games without Vulkan')
     print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=True))
 
 

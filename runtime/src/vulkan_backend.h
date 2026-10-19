@@ -41,23 +41,6 @@ struct VulkanSwapchain {
     void* surfaceMapped = nullptr;
     VkFormat format = VK_FORMAT_UNDEFINED;
     uint32_t layers = 0;
-    // OpenGL ES swapchains (ANGLE): the images belong to GL textures and are
-    // not destroyed here; GL keeps its bottom row first, so they are flipped
-    // on export; array layers are stacked in one 2D image, bandHeight apart.
-    bool borrowed = false;
-    bool glOrigin = false;
-    uint32_t bandHeight = 0;
-    // Each image's layout between frames. Vulkan swapchains stay in the
-    // attachment layout; GL hands its images over in whatever layout it left.
-    mutable std::array<VkImageLayout, 3> layouts{VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-};
-// Serializes this backend's submissions with another user of the same queue
-// (ANGLE's eglLockVulkanQueueANGLE); empty for a Vulkan application's queue.
-struct VulkanQueueLock {
-    void (*lock)(void*) = nullptr;
-    void (*unlock)(void*) = nullptr;
-    void* owner = nullptr;
 };
 struct VulkanExportRequest {
     const VulkanSwapchain* swapchains[2]{};
@@ -97,10 +80,7 @@ public:
     uint64_t scratch_allocation_count() const { return scratchAllocations_; }
     bool active() const { return device_ != VK_NULL_HANDLE; }
     static VkPhysicalDevice choose_device(VkInstance instance);
-    // queue: the queue to submit on when the binding's index does not name it
-    // (ANGLE reports its VkQueue, not an index).
-    bool initialize(const XrGraphicsBindingVulkanKHR& binding, VkQueue queue = VK_NULL_HANDLE,
-                    const VulkanQueueLock& lock = {});
+    bool initialize(const XrGraphicsBindingVulkanKHR& binding);
     void shutdown();
     std::vector<int64_t> formats() const;
     XrResult create(VulkanSwapchain& sc, const XrSwapchainCreateInfo& info);
@@ -120,9 +100,6 @@ private:
                         uint32_t width, uint32_t height, uint32_t layers, VkImageUsageFlags usage, uint32_t mips = 1);
     bool begin();
     bool finish(bool defer = false);
-    VkResult wait_queue_idle();
-    VkImageBlit eye_blit(const VulkanSwapchain& sc, const XrSwapchainSubImage& sub, bool flip, uint32_t width, uint32_t height) const;
-    VulkanQueueLock queueLock_{};
     bool wait_copy();
     std::unique_ptr<FramePublisher> publisher_;
     void barrier(VkImage image, uint32_t layers, VkImageLayout before, VkImageLayout after,

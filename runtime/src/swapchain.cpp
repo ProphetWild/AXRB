@@ -5,10 +5,8 @@ namespace axrb::runtime::detail {
 void destroy_swapchain_images(SwapchainRecord& sc)
 {
 #if defined(__ANDROID__)
-    const auto layouts = sc.vulkan.layouts;
     if (sc.vulkan.images[0]) { g_vulkan.destroy(sc.vulkan); }
     sc.surface.reset();
-    for (uint32_t i = 0; i < sc.transfers.size(); ++i) g_gles.destroy_transfer(sc.transfers[i], layouts[i]);
     if (sc.textures[0] != 0 || sc.textures[1] != 0 || sc.textures[2] != 0) {
         glDeleteTextures(3, sc.textures);
     }
@@ -62,34 +60,6 @@ void create_opengles_swapchain_images(SwapchainRecord& sc, const XrSwapchainCrea
     (void)createInfo;
 #endif
 }
-
-#if defined(__ANDROID__)
-// OpenGL ES through ANGLE: the application's textures as above, and for each
-// image a 2D texture ANGLE exports as a VkImage, which the frame path reads
-// like a Vulkan swapchain's (array layers stacked in it, rows bottom-up).
-static XrResult create_gles_swapchain_images(SwapchainRecord& sc, const XrSwapchainCreateInfo& createInfo)
-{
-    create_opengles_swapchain_images(sc, createInfo);
-    const GLenum internalFormat = createInfo.format == GL_SRGB8_ALPHA8 ? GL_SRGB8_ALPHA8 : GL_RGBA8;
-    for (uint32_t i = 0; i < sc.imageCount; ++i) {
-        if (!sc.textures[i] || !g_gles.create_transfer(sc.width, sc.height, sc.arraySize, internalFormat, sc.transfers[i]))
-            return XR_ERROR_RUNTIME_FAILURE;
-        sc.vulkan.images[i] = sc.transfers[i].image;
-        sc.vulkan.layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
-    }
-    sc.vulkan.format = sc.transfers[0].format;
-    sc.vulkan.layers = 1;
-    sc.vulkan.borrowed = true;
-    sc.vulkan.glOrigin = true;
-    sc.vulkan.bandHeight = sc.arraySize > 1 ? sc.height : 0;
-    static unsigned reported = 0;
-    if (reported++ < 8)
-        __android_log_print(ANDROID_LOG_INFO, "AXRB.GLES", "swapchain %ux%u layers=%u mips=%u GL format 0x%llx as Vulkan format %d",
-                            sc.width, sc.height, sc.arraySize, createInfo.mipCount,
-                            static_cast<unsigned long long>(createInfo.format), static_cast<int>(sc.vulkan.format));
-    return XR_SUCCESS;
-}
-#endif
 XrResult XRAPI_CALL xrEnumerateSwapchainFormats_impl(
     XrSession session,
     uint32_t formatCapacityInput,
@@ -106,7 +76,7 @@ XrResult XRAPI_CALL xrEnumerateSwapchainFormats_impl(
 
     std::vector<int64_t> supported{0x8058, 0x8C43};
 #if defined(__ANDROID__)
-    if (g_vulkan.active() && !g_gles.active()) supported = g_vulkan.formats();
+    if (g_vulkan.active()) supported = g_vulkan.formats();
 #endif
     *formatCountOutput = static_cast<uint32_t>(supported.size());
     if (!formatCapacityInput) return XR_SUCCESS;
@@ -155,10 +125,7 @@ XrResult XRAPI_CALL xrCreateSwapchain_impl(
     sc.arraySize = createInfo->arraySize;
     sc.format = createInfo->format;
 #if defined(__ANDROID__)
-    if (g_gles.active()) {
-        const XrResult result = create_gles_swapchain_images(sc, *createInfo);
-        if (result != XR_SUCCESS) { destroy_swapchain_images(sc); sc = {}; return result; }
-    } else if (g_vulkan.active()) {
+    if (g_vulkan.active()) {
         const XrResult result = g_vulkan.create(sc.vulkan, *createInfo);
         if (result != XR_SUCCESS) { sc = {}; return result; }
     } else
@@ -204,7 +171,7 @@ XrResult XRAPI_CALL xrEnumerateSwapchainImages_impl(
         const uint32_t count = imageCapacityInput < *imageCountOutput ? imageCapacityInput : *imageCountOutput;
         if (images[0].type == XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR) {
 #if defined(__ANDROID__)
-            if (g_vulkan.active() && !g_gles.active()) return XR_ERROR_VALIDATION_FAILURE;
+            if (g_vulkan.active()) return XR_ERROR_VALIDATION_FAILURE;
 #endif
             auto* glImages = reinterpret_cast<XrSwapchainImageOpenGLESKHR*>(images);
             for (uint32_t i = 0; i < count; ++i) {
@@ -220,7 +187,7 @@ XrResult XRAPI_CALL xrEnumerateSwapchainImages_impl(
                     return XR_ERROR_VALIDATION_FAILURE;
                 }
 #if defined(__ANDROID__)
-                if (!g_vulkan.active() || g_gles.active()) return XR_ERROR_VALIDATION_FAILURE;
+                if (!g_vulkan.active()) return XR_ERROR_VALIDATION_FAILURE;
                 vkImages[i].image = reinterpret_cast<uint64_t>(sc.vulkan.images[i]);
 #else
                 return XR_ERROR_FEATURE_UNSUPPORTED;
@@ -305,12 +272,6 @@ XrResult XRAPI_CALL xrReleaseSwapchainImage_impl(
     sc.releasedImage = sc.currentImage;
     sc.hasReleasedImage = true;
     g_lastReleasedSwapchain = &sc;
-#if defined(__ANDROID__)
-    if (g_gles.active() && sc.transfers[sc.releasedImage].texture) {
-        g_gles.hand_over(sc.textures[sc.releasedImage], sc.arraySize > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D,
-                         sc.width, sc.height, sc.arraySize, sc.transfers[sc.releasedImage], sc.vulkan.layouts[sc.releasedImage]);
-    }
-#endif
     return XR_SUCCESS;
 }
 
