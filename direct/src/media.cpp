@@ -528,6 +528,13 @@ void art_media_init() {
             }
         }
         if (!p) return call.ret(static_cast<uint64_t>(-1));
+        // What the application asks of its players (not the frequent queries).
+        static std::atomic<int> reported{0};
+        if ((op == 2 || (op >= 4 && op <= 8) || op == 12) && reported++ < 64) {
+            static const char* const names[] = {"", "source", "surface", "", "start", "pause", "stop", "seek", "looping",
+                                                "", "", "", "release"};
+            LOGI("media", "MediaPlayer %lld: %s %lld", static_cast<long long>(id), names[op], static_cast<long long>(call.x(2)));
+        }
         switch (op) {
             case 1: {
                 int64_t length = static_cast<int64_t>(call.x(4));
