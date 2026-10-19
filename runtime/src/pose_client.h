@@ -10,6 +10,10 @@
 
 namespace axrb::runtime {
 
+// The host bridge's pose port (38490, or debug.axrb.bridge_port); frames go to
+// the next port.
+uint16_t bridge_port();
+
 class PoseClient {
 public:
     // Return a snapshot: callers may use it while another thread polls input.

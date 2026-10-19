@@ -101,7 +101,8 @@ GLenum gl_layout(VkImageLayout layout) {
 
 // The game's GL errors as ANGLE explains them (validation stays on: see
 // forceGlErrorChecking in prepare_art_session.py). Each distinct message is
-// logged a few times, so a call failing every frame cannot flood the log.
+// logged a few times, so a call failing every frame cannot flood the log, and
+// again at 100, 1000, ... occurrences to show whether it keeps failing.
 void GL_APIENTRY log_gl_error(GLenum, GLenum type, GLuint, GLenum, GLsizei, const GLchar* message, const void*) {
     if (type != GL_DEBUG_TYPE_ERROR_KHR || !message) return;
     static std::mutex mutex;
@@ -114,7 +115,10 @@ void GL_APIENTRY log_gl_error(GLenum, GLenum type, GLuint, GLenum, GLsizei, cons
         if (distinct == 64) return;
         std::strncpy(seen[distinct++], message, sizeof seen[0] - 1);
     }
-    if (counts[slot]++ < 3) __android_log_print(ANDROID_LOG_WARN, "AXRB.GLES", "GL error: %s", message);
+    const int count = ++counts[slot];
+    if (count <= 3) __android_log_print(ANDROID_LOG_WARN, "AXRB.GLES", "GL error: %s", message);
+    else if (count == 100 || count == 1000 || count == 10000 || count == 100000)
+        __android_log_print(ANDROID_LOG_WARN, "AXRB.GLES", "GL error x%d: %s", count, message);
 }
 
 template <typename T>

@@ -216,7 +216,7 @@ private:
             setsockopt(candidate, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
             sockaddr_in address{};
             address.sin_family = AF_INET;
-            address.sin_port = htons(38491);
+            address.sin_port = htons(static_cast<uint16_t>(bridge_port() + 1));
             char transport[PROP_VALUE_MAX]{};
             __system_property_get("debug.axrb.image_transport", transport);
             const bool adbReverse = std::strcmp(transport, "adb") == 0;

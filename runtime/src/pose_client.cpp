@@ -2,6 +2,7 @@
 #include "perf_stats.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <chrono>
@@ -24,9 +25,23 @@
 
 namespace axrb::runtime {
 
-namespace {
+uint16_t bridge_port()
+{
+    static const uint16_t port = [] {
+        unsigned value = 38490;
+#if defined(__ANDROID__)
+        char text[PROP_VALUE_MAX]{};
+        if (__system_property_get("debug.axrb.bridge_port", text) > 0) {
+            const unsigned parsed = static_cast<unsigned>(std::strtoul(text, nullptr, 10));
+            if (parsed > 0 && parsed < 65535) value = parsed;
+        }
+#endif
+        return static_cast<uint16_t>(value);
+    }();
+    return port;
+}
 
-constexpr uint16_t kDefaultBridgePort = 38490;
+namespace {
 
 void log_pose_client(const char* message)
 {
@@ -64,7 +79,7 @@ void log_connect_failure(const char* host, int error)
         sizeof(message),
         "connect failed host=%s port=%u errno=%d (%s)",
         host,
-        static_cast<unsigned>(kDefaultBridgePort),
+        static_cast<unsigned>(bridge_port()),
         error,
         std::strerror(error));
     log_pose_client(message);
@@ -265,7 +280,7 @@ bool PoseClient::ensure_connected()
 
         sockaddr_in address{};
         address.sin_family = AF_INET;
-        address.sin_port = htons(kDefaultBridgePort);
+        address.sin_port = htons(bridge_port());
         if (inet_pton(AF_INET, host, &address.sin_addr) != 1) {
             close(candidate);
             continue;
@@ -319,7 +334,7 @@ bool PoseClient::ensure_emulator_connected()
     if (socket_ < 0) { return false; }
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_port = htons(kDefaultBridgePort);
+    address.sin_port = htons(bridge_port());
     inet_pton(AF_INET, "10.0.2.2", &address.sin_addr);
     if (connect(socket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0) { return true; }
     if (errno == EINPROGRESS) { connecting_ = true; return false; }
