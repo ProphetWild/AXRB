@@ -31,8 +31,8 @@
       "label": "Assassin's Creed Nexus VR 207706",
       "package": "com.Ubisoft.ACNexusVR",
       "versions": [{ "versionCode": "207706" }],
-      "runtime": { "renderScale": 1.35 },
-      "summary": "The game renders gameplay at a fixed 85% of the recommended eye size (its Quest 2 profile, which OVRPort pins; reporting a Quest 3 through Android crashes it at start). Direct mode reports a 35% larger size, so gameplay renders about 15% above the headset's resolution and is scaled down, which looks sharper than 1.18 (native) did; it held 90 fps at 1.18."
+      "runtime": { "renderScale": 1.35, "hideSpaceWarp": true },
+      "summary": "The game renders gameplay at a fixed 85% of the recommended eye size (its Quest 2 profile, which OVRPort pins; reporting a Quest 3 through Android crashes it at start). Direct mode reports a 35% larger size, so gameplay renders about 15% above the headset's resolution and is scaled down; it held 90 fps at 1.18. OVRPort's shim offers Application SpaceWarp, which the game enables (it creates motion-vector swapchains and paces itself for a half-rate compositor that AXRB does not have), so it is hidden from the game."
     },
     {
       "id": "iron-man-vr-0.2.1",

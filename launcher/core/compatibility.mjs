@@ -7,7 +7,7 @@ const VERSION_KEYS = new Set(['versionCode', 'versionName']);
 const OVRPORT_KEYS = new Set(['recommended', 'extraPatches']);
 // legacyOculusDriver, questIdentity and controllersOnly serve unmodified Quest
 // APKs with older Oculus loaders in Direct mode (docs/iron_man_vr_compatibility.md).
-const RUNTIME_KEYS = new Set(['precomposeProjectionLayers', 'legacyOculusDriver', 'questIdentity', 'controllersOnly', 'renderScale']);
+const RUNTIME_KEYS = new Set(['precomposeProjectionLayers', 'legacyOculusDriver', 'questIdentity', 'controllersOnly', 'renderScale', 'hideSpaceWarp']);
 // Patch names travel inside a semicolon-separated `--extra-patches` value where
 // `=` introduces per-patch arguments, so anything outside a plain identifier
 // would either split the value or inject arguments.

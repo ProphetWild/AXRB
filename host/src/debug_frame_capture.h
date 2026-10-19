@@ -8,8 +8,10 @@
 #include <string>
 #include <map>
 
-// Opt-in diagnostics only. Four occasional readbacks after loading, never part
-// of the normal shared-GPU path. Set AXRB_CAPTURE_PREFIX before starting host.
+// Opt-in diagnostics only. A few occasional readbacks after loading, never part
+// of the normal shared-GPU path. Set AXRB_CAPTURE_PREFIX before starting host;
+// AXRB_CAPTURE_COUNT (default 4) and AXRB_CAPTURE_INTERVAL_SECONDS (default 5)
+// spread them out.
 inline bool debug_capture_frame(ID3D11DeviceContext* context, ID3D11Texture2D* image,
     UINT width, UINT height, uint64_t sequence, const std::string& label = {}) {
     static const std::string prefix = [] {const char* p=std::getenv("AXRB_CAPTURE_PREFIX");return p?std::string(p):std::string();}();
@@ -20,11 +22,13 @@ inline bool debug_capture_frame(ID3D11DeviceContext* context, ID3D11Texture2D* i
     static const auto started = std::chrono::steady_clock::now();
     static const int delaySeconds = [] {const char* p=std::getenv("AXRB_CAPTURE_DELAY_SECONDS");return p?std::atoi(p):0;}();
     static const uint64_t firstSequence = [] {const char* p=std::getenv("AXRB_CAPTURE_FIRST_SEQUENCE");return p?std::strtoull(p,nullptr,10):2000ULL;}();
+    static const unsigned count = [] {const char* p=std::getenv("AXRB_CAPTURE_COUNT");return p&&std::atoi(p)>0?unsigned(std::atoi(p)):4u;}();
+    static const int intervalSeconds = [] {const char* p=std::getenv("AXRB_CAPTURE_INTERVAL_SECONDS");return p&&std::atoi(p)>0?std::atoi(p):5;}();
     auto& previous = state.previous;
-    if (prefix.empty() || captured>=4 || sequence<firstSequence) return false;
+    if (prefix.empty() || captured>=count || sequence<firstSequence) return false;
     const auto now=std::chrono::steady_clock::now();
     if (now-started<std::chrono::seconds(delaySeconds)) return false;
-    if (now-previous<std::chrono::seconds(5)) return false;
+    if (now-previous<std::chrono::seconds(intervalSeconds)) return false;
     previous=now;
     Microsoft::WRL::ComPtr<ID3D11Device> device; context->GetDevice(&device);
     D3D11_TEXTURE2D_DESC desc{};image->GetDesc(&desc);

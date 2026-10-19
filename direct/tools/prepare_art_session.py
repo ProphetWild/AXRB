@@ -74,6 +74,28 @@ def lift_shim_swapchain_limit(libraries):
     os.replace(partial, shim)
 
 
+SPACE_WARP_SHOWN, SPACE_WARP_HIDDEN = b'XR_FB_space_warp\0', b'XR_FB_space_waX\0\0'
+
+
+def set_shim_space_warp(libraries, hidden):
+    # OVRPort's shim advertises XR_FB_space_warp (Application SpaceWarp) on
+    # its own; AXRB's runtime has no frame synthesis behind it. Games that
+    # enable it switch to their half-rate SpaceWarp path (AC Nexus creates
+    # motion-vector swapchains and paces its frames for it). Renaming the
+    # shim's copy of the name hides it; the staged copy is shared by every
+    # launch of this APK, so it is set either way each time.
+    shim = libraries / 'libopenxr_loader.so'
+    if not shim.is_file():
+        return
+    code = shim.read_bytes()
+    old, new = (SPACE_WARP_SHOWN, SPACE_WARP_HIDDEN) if hidden else (SPACE_WARP_HIDDEN, SPACE_WARP_SHOWN)
+    if code.count(old) != 1 or new in code:
+        return
+    partial = shim.with_name(shim.name + '.axrb-patch')
+    partial.write_bytes(code.replace(old, new))
+    os.replace(partial, shim)
+
+
 def boot_classpath(sysroot):
     boot = [f'/apex/com.android.art/javalib/{n}.jar' for n in
             ('core-oj', 'core-libart', 'okhttp', 'bouncycastle', 'apache-xml')]
@@ -181,7 +203,7 @@ LEGACY_DRIVER_ROOT = '/data/app/com.oculus.systemdriver-axrb'
 def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
             runtime=None, assets=None, check_jni=False, diagnostics=False,
             legacy_oculus_driver=None, quest_identity=False, controllers_only=False, textures='rgba8',
-            render_scale=1.0, gles='auto'):
+            render_scale=1.0, gles='auto', hide_space_warp=False):
     apk, bootstrap = required(apk), required(bootstrap)
     sysroot, data = Path(sysroot).resolve(), Path(data).resolve()
     native, proxies = Path(native), Path(proxies)
@@ -200,6 +222,7 @@ def prepare(*, apk, activity, sysroot, data, bootstrap, native, proxies,
     boot = boot_classpath(sysroot)
     libraries = stage_libraries(apk, data)
     lift_shim_swapchain_limit(libraries)
+    set_shim_space_warp(libraries, hide_space_warp)
     args = ['--host-graphics', '--low-memory', '--sysroot', str(sysroot), '--data', str(data)]
 
     def mount(guest, host, directory=False):
@@ -309,6 +332,8 @@ def main():
     parser.add_argument('--diagnostics', action='store_true')
     parser.add_argument('--textures', choices=('rgba8', 'gpu', 'bc7'), default='rgba8')
     parser.add_argument('--render-scale', type=float, default=1.0)
+    parser.add_argument('--hide-space-warp', action='store_true',
+                        help="hide XR_FB_space_warp in OVRPort's shim so the game renders without Application SpaceWarp")
     parser.add_argument('--gles', choices=('auto', 'angle', 'stub'), default='auto',
                         help='OpenGL ES driver: ANGLE, the stub, or ANGLE for Unreal games without Vulkan')
     print(json.dumps(prepare(**vars(parser.parse_args())), ensure_ascii=True))

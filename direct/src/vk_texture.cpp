@@ -12,6 +12,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdarg>
 #include <cstring>
 #include <map>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <thread>
 
 // --- android/log.h and sys/system_properties.h for the shared code -------------------------
 

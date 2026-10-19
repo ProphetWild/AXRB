@@ -23,6 +23,8 @@ param(
     [switch]$LegacyOculusDriver,
     [switch]$QuestIdentity,
     [switch]$ControllersOnly,
+    # Hides OVRPort's XR_FB_space_warp so the game renders without Application SpaceWarp.
+    [switch]$HideSpaceWarp,
     # OpenGL ES driver: ANGLE (on the forwarded Vulkan driver), the stub with no
     # display, or auto: ANGLE for Unreal games built without Vulkan.
     # AXRB_DIRECT_GLES overrides auto.
@@ -64,6 +66,7 @@ if ($AssetList) { $prepare += @('--assets', $AssetList) }
 if ($LegacyOculusDriver) { $prepare += @('--legacy-oculus-driver', (Join-Path $directDirectory 'guest/axrb-systemdriver.apk')) }
 if ($QuestIdentity) { $prepare += '--quest-identity' }
 if ($ControllersOnly) { $prepare += '--controllers-only' }
+if ($HideSpaceWarp) { $prepare += '--hide-space-warp' }
 if ($Gles -eq 'auto' -and $env:AXRB_DIRECT_GLES -in @('angle', 'stub')) { $Gles = $env:AXRB_DIRECT_GLES }
 $prepare += @('--gles', $Gles)
 $prepared = & $python @prepare
@@ -92,6 +95,26 @@ try {
         # timer tick and miss the display deadline. AXRB_PRECISE_IMAGE_WAIT=0
         # in the environment keeps the default.
         AXRB_PRECISE_IMAGE_WAIT = $(if ($env:AXRB_PRECISE_IMAGE_WAIT) { $env:AXRB_PRECISE_IMAGE_WAIT } else { '1' })
+    }
+    # One-shot frame capture for diagnosis: a file logs/game/capture-next
+    # (optionally holding "<first second> <count> <interval>" and a package
+    # name to wait for) makes the bridge save left-eye frames as PPM images to
+    # logs/game/capture, then is removed. Each capture briefly stalls presentation.
+    $captureRequest = Join-Path $logs 'capture-next'
+    $captureWords = if (Test-Path -LiteralPath $captureRequest) { @((Get-Content -LiteralPath $captureRequest -Raw -ErrorAction SilentlyContinue) -split '\s+' | Where-Object { $_ }) } else { $null }
+    $capturePackages = @($captureWords | Where-Object { $_ -notmatch '^\d+$' })
+    if ($null -ne $captureWords -and ($capturePackages.Count -eq 0 -or $capturePackages -contains $Package)) {
+        $timing = @($captureWords | Where-Object { $_ -match '^\d+$' })
+        $captures = Join-Path $logs 'capture'
+        if (Test-Path -LiteralPath $captures) { Remove-Item -LiteralPath $captures -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $captures | Out-Null
+        $environment.AXRB_CAPTURE_PREFIX = Join-Path $captures 'frame'
+        $environment.AXRB_CAPTURE_DELAY_SECONDS = $(if ($timing.Count -ge 1) { $timing[0] } else { '75' })
+        $environment.AXRB_CAPTURE_COUNT = $(if ($timing.Count -ge 2) { $timing[1] } else { '6' })
+        $environment.AXRB_CAPTURE_INTERVAL_SECONDS = $(if ($timing.Count -ge 3) { $timing[2] } else { '20' })
+        $environment.AXRB_CAPTURE_FIRST_SEQUENCE = '0'
+        Remove-Item -LiteralPath $captureRequest -Force
+        $capturing = $true
     }
     foreach ($name in $environment.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name); [Environment]::SetEnvironmentVariable($name, $environment[$name]) }
     $sessionStartedAt = Get-Date
@@ -197,6 +220,8 @@ try {
             preciseImageWait = $(if ($env:AXRB_PRECISE_IMAGE_WAIT) { $env:AXRB_PRECISE_IMAGE_WAIT } else { '1' })
             precomposeProjectionLayers = [bool]$PrecomposeProjectionLayers
             legacyOculusDriver = [bool]$LegacyOculusDriver; questIdentity = [bool]$QuestIdentity; controllersOnly = [bool]$ControllersOnly
+            hideSpaceWarp = [bool]$HideSpaceWarp
+            frameCapture = [bool]$capturing
         }
         build = $(try {
             $info = Join-Path (Split-Path -Parent $Executable) 'build-info.json'

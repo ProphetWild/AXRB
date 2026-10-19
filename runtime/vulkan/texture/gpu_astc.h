@@ -18,13 +18,14 @@ public:
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandBuffer command = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
+        VkDescriptorPool setPool = VK_NULL_HANDLE;
         ~Job() { owner->release(*this); }
     };
     GpuAstc(VkDevice device, PFN_vkGetDeviceProcAddr gdpa, PFN_vkSetDeviceLoaderData loader)
         : device_(device), loader_(loader) { ready_ = loader && createGpu(gdpa); }
     ~GpuAstc() {
         if (!ready_) return;
-        destroyDescriptorPool_(device_, descriptorPool_, nullptr);
+        for (auto pool : descriptorPools_) destroyDescriptorPool_(device_, pool, nullptr);
         destroyPipeline_(device_, pipeline_, nullptr);
         destroyPipelineLayout_(device_, pipelineLayout_, nullptr);
         destroySetLayout_(device_, setLayout_, nullptr);
@@ -41,9 +42,7 @@ public:
         // Descriptor pools are externally synchronized. Each job owns a separate
         // command pool, so reset/free of different application buffers is safe.
         std::unique_lock lock(mutex_);
-        VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        setInfo.descriptorPool = descriptorPool_; setInfo.descriptorSetCount = 1; setInfo.pSetLayouts = &setLayout_;
-        if (allocateSets_(device_, &setInfo, &job->set) != VK_SUCCESS) return {};
+        if (!allocateSet(*job)) return {};
         VkDescriptorBufferInfo binding{buffer, 0, bytes};
         VkWriteDescriptorSet writes[2]{};
         for (uint32_t i=0;i<2;++i) {
@@ -83,7 +82,38 @@ private:
     void release(Job& job) {
         std::lock_guard lock(mutex_);
         if (job.pool) destroyCommandPool_(device_,job.pool,nullptr);
-        if (job.set) freeSets_(device_,descriptorPool_,1,&job.set);
+        if (job.set) freeSets_(device_,job.setPool,1,&job.set);
+    }
+    // A job keeps its set until the game's command buffer is done with it, and
+    // a level load records hundreds of uploads before submitting (Deadpool: over
+    // 500 in one buffer). A fixed pool ran dry and sent the rest to the CPU
+    // decoder, so pools are added as needed; freed sets are reused first.
+    bool allocateSet(Job& job) {
+        VkDescriptorSetAllocateInfo setInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        setInfo.descriptorSetCount = 1; setInfo.pSetLayouts = &setLayout_;
+        for (size_t tried = 0; tried < descriptorPools_.size(); ++tried) {
+            const size_t index = (currentPool_ + tried) % descriptorPools_.size();
+            setInfo.descriptorPool = descriptorPools_[index];
+            if (allocateSets_(device_, &setInfo, &job.set) == VK_SUCCESS) {
+                currentPool_ = index; job.setPool = descriptorPools_[index]; return true;
+            }
+        }
+        if (descriptorPools_.size() >= kMaxPools) return false;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        if (!createPool(pool)) return false;
+        descriptorPools_.push_back(pool);
+        currentPool_ = descriptorPools_.size() - 1;
+        setInfo.descriptorPool = pool;
+        if (allocateSets_(device_, &setInfo, &job.set) != VK_SUCCESS) return false;
+        job.setPool = pool;
+        return true;
+    }
+    bool createPool(VkDescriptorPool& pool) {
+        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxSets};
+        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT; poolInfo.maxSets = kMaxSets;
+        poolInfo.poolSizeCount = 1; poolInfo.pPoolSizes = &poolSize;
+        return createDescriptorPool_(device_, &poolInfo, nullptr, &pool) == VK_SUCCESS;
     }
     VkDevice device_;
     PFN_vkSetDeviceLoaderData loader_;
@@ -94,12 +124,12 @@ private:
             fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(gdpa(device_, name)); return fn != nullptr; };
         PFN_vkCreateShaderModule createShader = nullptr; PFN_vkDestroyShaderModule destroyShader = nullptr;
         PFN_vkCreateDescriptorSetLayout createSetLayout = nullptr; PFN_vkCreatePipelineLayout createPipelineLayout = nullptr;
-        PFN_vkCreateComputePipelines createPipelines = nullptr; PFN_vkCreateDescriptorPool createDescriptorPool = nullptr;
+        PFN_vkCreateComputePipelines createPipelines = nullptr;
         bool ok = load(createShader, "vkCreateShaderModule") && load(destroyShader, "vkDestroyShaderModule") &&
             load(createSetLayout, "vkCreateDescriptorSetLayout") && load(destroySetLayout_, "vkDestroyDescriptorSetLayout") &&
             load(createPipelineLayout, "vkCreatePipelineLayout") && load(destroyPipelineLayout_, "vkDestroyPipelineLayout") &&
             load(createPipelines, "vkCreateComputePipelines") && load(destroyPipeline_, "vkDestroyPipeline") &&
-            load(createDescriptorPool, "vkCreateDescriptorPool") && load(destroyDescriptorPool_, "vkDestroyDescriptorPool") &&
+            load(createDescriptorPool_, "vkCreateDescriptorPool") && load(destroyDescriptorPool_, "vkDestroyDescriptorPool") &&
             load(allocateSets_, "vkAllocateDescriptorSets") && load(freeSets_, "vkFreeDescriptorSets") &&
             load(updateSets_, "vkUpdateDescriptorSets") && load(createCommandPool_, "vkCreateCommandPool") &&
             load(destroyCommandPool_, "vkDestroyCommandPool") && load(allocateCommands_, "vkAllocateCommandBuffers") &&
@@ -121,17 +151,16 @@ private:
         layoutInfo.setLayoutCount = 1; layoutInfo.pSetLayouts = &setLayout_; layoutInfo.pushConstantRangeCount = 1; layoutInfo.pPushConstantRanges = &range;
         VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         pipelineInfo.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, shader, "main", nullptr};
-        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kMaxSets};
-        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT; poolInfo.maxSets = kMaxSets;
-        poolInfo.poolSizeCount = 1; poolInfo.pPoolSizes = &poolSize;
+        VkDescriptorPool firstPool = VK_NULL_HANDLE;
         ok = createSetLayout(device_, &setInfo, nullptr, &setLayout_) == VK_SUCCESS &&
              createPipelineLayout(device_, &layoutInfo, nullptr, &pipelineLayout_) == VK_SUCCESS &&
              (pipelineInfo.layout = pipelineLayout_, createPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_) == VK_SUCCESS) &&
-             createDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool_) == VK_SUCCESS;
+             createPool(firstPool);
+        if (firstPool) descriptorPools_.push_back(firstPool);
         destroyShader(device_, shader, nullptr);
         if (!ok) {
-            if (descriptorPool_) destroyDescriptorPool_(device_, descriptorPool_, nullptr);
+            for (auto pool : descriptorPools_) destroyDescriptorPool_(device_, pool, nullptr);
+            descriptorPools_.clear();
             if (pipeline_) destroyPipeline_(device_, pipeline_, nullptr);
             if (pipelineLayout_) destroyPipelineLayout_(device_, pipelineLayout_, nullptr);
             if (setLayout_) destroySetLayout_(device_, setLayout_, nullptr);
@@ -139,11 +168,14 @@ private:
         return ok;
     }
 
-    static constexpr uint32_t kMaxSets = 128;
+    static constexpr uint32_t kMaxSets = 256;
+    static constexpr size_t kMaxPools = 64;  // 16384 uploads in flight
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
-    VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorPool> descriptorPools_;
+    size_t currentPool_ = 0;
+    PFN_vkCreateDescriptorPool createDescriptorPool_ = nullptr;
     PFN_vkDestroyDescriptorSetLayout destroySetLayout_ = nullptr;
     PFN_vkDestroyPipelineLayout destroyPipelineLayout_ = nullptr;
     PFN_vkDestroyPipeline destroyPipeline_ = nullptr;

@@ -1,6 +1,8 @@
 #include "runtime_internal.h"
 #include "frame_wait_budget.h"
+#include <algorithm>
 #include <deque>
+#include <iterator>
 #include <mutex>
 
 namespace axrb::runtime::detail {
@@ -278,6 +280,55 @@ XrResult XRAPI_CALL xrBeginFrame_impl(XrSession session, const XrFrameBeginInfo*
     return XR_SUCCESS;
 }
 
+#if defined(__ANDROID__)
+// Diagnostics for what a game submits beyond the layers themselves: each
+// structure type chained to the frame, its layers or their views, logged the
+// first time (XR_FB_space_warp's motion vectors show up here as 1000171000),
+// and every 10 s how far apart consecutive frames' display times are, in
+// display periods. A game that renders each image for two display periods, or
+// repeats a display time, shows it there.
+static void report_frame_end(const XrFrameEndInfo& info) {
+    struct Chain { XrStructureType type; const void* next; };
+    static int seen[16]{}; static unsigned seenCount = 0;
+    auto note = [](const void* next, const char* where) {
+        for (auto* item = static_cast<const Chain*>(next); item; item = static_cast<const Chain*>(item->next)) {
+            bool known = false;
+            for (unsigned i = 0; i < seenCount; ++i) known |= seen[i] == static_cast<int>(item->type);
+            if (known || seenCount == 16) continue;
+            seen[seenCount++] = static_cast<int>(item->type);
+            __android_log_print(ANDROID_LOG_INFO, "AXRB.Frame", "chained structure %d on %s", static_cast<int>(item->type), where);
+        }
+    };
+    note(info.next, "frame end info");
+    for (uint32_t i = 0; info.layers && i < info.layerCount; ++i) {
+        const auto* layer = static_cast<const XrCompositionLayerBaseHeader*>(info.layers[i]);
+        if (!layer) continue;
+        note(layer->next, "layer");
+        if (layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+        const auto* projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+        for (uint32_t v = 0; projection->views && v < projection->viewCount; ++v) note(projection->views[v].next, "projection view");
+    }
+    static XrTime lastDisplay = 0, windowStart = 0;
+    static unsigned steps[5]{};  // repeated display time, 1, 2, 3 periods, more
+    const XrTime period = axrb::protocol::display_period_or_default(pose_client().latest_pose_frame());
+    if (lastDisplay && period > 0) {
+        const XrTime delta = info.displayTime - lastDisplay;
+        const XrTime periods = delta <= 0 ? 0 : (delta + period / 2) / period;
+        ++steps[std::min<XrTime>(periods, 4)];
+    }
+    lastDisplay = info.displayTime;
+    const XrTime now = monotonic_time_ns();
+    if (!windowStart) windowStart = now;
+    if (now - windowStart >= 10'000'000'000) {
+        __android_log_print(ANDROID_LOG_INFO, "AXRB.Frame",
+            "display times over 10 s: %u one period apart, %u two, %u three, %u more, %u repeated or earlier",
+            steps[1], steps[2], steps[3], steps[4], steps[0]);
+        std::fill(std::begin(steps), std::end(steps), 0u);
+        windowStart = now;
+    }
+}
+#endif
+
 XrResult XRAPI_CALL xrEndFrame_impl(XrSession session, const XrFrameEndInfo* frameEndInfo)
 {
     static axrb::protocol::PerfStats stats("end-frame");
@@ -293,6 +344,9 @@ XrResult XRAPI_CALL xrEndFrame_impl(XrSession session, const XrFrameEndInfo* fra
         return XR_ERROR_SESSION_NOT_RUNNING;
     }
     g_submitLatency.submitted(monotonic_time_ns());
+#if defined(__ANDROID__)
+    report_frame_end(*frameEndInfo);
+#endif
     // A frame the bridge cannot deliver is dropped, as a compositor would do.
     // OVRPlugin exits the game on any xrEndFrame runtime failure; the cause
     // is logged under AXRB.Frame and later frames may recover (export fallback).

@@ -27,6 +27,12 @@ std::mutex g_private_lock;
 std::map<VkImage, PrivateImage> g_private;
 std::vector<PrivateBlock> g_private_blocks;
 constexpr VkDeviceSize kPrivateBlock = VkDeviceSize(256) << 20;
+// A 256 MiB allocation can take tens of milliseconds, and streaming games bind
+// textures from their render threads (Deadpool's 40-90 ms hitches lined up
+// with new blocks). The next block is allocated on a thread of its own while
+// the last one still has room; DestroyDevice waits for it.
+std::condition_variable g_private_idle;
+unsigned g_private_prefetching = 0;
 
 VkDeviceSize align_up(VkDeviceSize value, VkDeviceSize alignment) {
   return alignment > 1 ? (value + alignment - 1) / alignment * alignment : value;
@@ -110,12 +116,49 @@ bool private_take(const DeviceCalls &calls, VkDevice device, uint32_t type, VkDe
     VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = block.size;
     allocate.memoryTypeIndex = type;
+    const auto started = std::chrono::steady_clock::now();
     if (calls.allocateMemory(device, &allocate, nullptr, &block.memory) != VK_SUCCESS) return false;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     block.free[0] = block.size;
     g_private_blocks.push_back(std::move(block));
-    LOGI("vulkan", "uncompressed texture memory: %zu block(s) of type %u", g_private_blocks.size(), type);
+    LOGI("vulkan", "uncompressed texture memory: %zu block(s) of type %u (allocated while binding, %.1f ms)",
+         g_private_blocks.size(), type, ms);
   }
   return false;
+}
+
+// Free bytes left in this device's blocks of one type. Lock held.
+VkDeviceSize private_free(VkDevice device, uint32_t type) {
+  VkDeviceSize total = 0;
+  for (const auto &block : g_private_blocks)
+    if (block.device == device && block.type == type)
+      for (const auto &range : block.free) total += range.second;
+  return total;
+}
+
+// Starts allocating the next block when less than a quarter block is free. Lock held.
+void private_prefetch(std::shared_ptr<const DeviceCalls> calls, VkDevice device, uint32_t type) {
+  if (g_private_prefetching || private_free(device, type) >= kPrivateBlock / 4) return;
+  ++g_private_prefetching;
+  std::thread([calls = std::move(calls), device, type] {
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = kPrivateBlock;
+    allocate.memoryTypeIndex = type;
+    VkDeviceMemory memory{};
+    const auto started = std::chrono::steady_clock::now();
+    const bool ok = calls->allocateMemory(device, &allocate, nullptr, &memory) == VK_SUCCESS;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    std::lock_guard guard(g_private_lock);
+    if (ok) {
+      PrivateBlock block{device, type, memory, kPrivateBlock};
+      block.free[0] = block.size;
+      g_private_blocks.push_back(std::move(block));
+      LOGI("vulkan", "uncompressed texture memory: %zu block(s) of type %u (allocated ahead, %.1f ms)",
+           g_private_blocks.size(), type, ms);
+    }
+    --g_private_prefetching;
+    g_private_idle.notify_all();
+  }).detach();
 }
 
 // Binds a private image to its own memory; the game's memory is ignored.
@@ -145,6 +188,7 @@ VkResult bind_private(VkDevice device, VkImage image) {
     entry.memory = memory;
     entry.offset = offset;
     entry.size = real.size;
+    private_prefetch(calls, device, type);
   }
   return host<PFN_vkBindImageMemory>("vkBindImageMemory")(device, image, memory, offset);
 }
@@ -180,7 +224,8 @@ void release_private(VkImage image) {
 
 void destroy_private_device(VkDevice device) {
   auto calls = calls_for(device);
-  std::lock_guard guard(g_private_lock);
+  std::unique_lock guard(g_private_lock);
+  g_private_idle.wait(guard, [] { return g_private_prefetching == 0; });
   for (auto it = g_private.begin(); it != g_private.end();) it = it->second.device == device ? g_private.erase(it) : std::next(it);
   for (auto it = g_private_blocks.begin(); it != g_private_blocks.end();) {
     if (it->device != device) { ++it; continue; }
